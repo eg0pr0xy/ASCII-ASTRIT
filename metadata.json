@@ -1,0 +1,7 @@
+{
+  "name": "ASCII ASTRIT",
+  "description": "A state-of-the-art ASCII Art Engine mixing PICO-8 aesthetics with hyper-modern creative coding tools.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
