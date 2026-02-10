@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ░▒▓ ASCII ASTRIT ▓▒░
 ### The Hyper-Modern PICO-8 ASCII Engine
 
@@ -90,3 +91,6 @@ interface EngineConfig {
 
 ---
 **DEVELOPED BY NEUE EPISTEME STUDIO // V3.5 "SOBEL UPDATE"**
+=======
+# ASCII-ASTRIT
+>>>>>>> origin/main
