@@ -87,6 +87,16 @@ const firstGrapheme = (value: string, fallback = ' '): string => {
   return graphemes[0] || fallback;
 };
 
+const normalizeSemanticWord = (value: unknown, fallback: string): string => {
+  const source = typeof value === 'string' ? value : fallback;
+  const graphemes = splitGraphemes(source.trim());
+  if (graphemes.length === 0) {
+    const fallbackGraphemes = splitGraphemes((fallback || 'ASTRIT').trim());
+    return fallbackGraphemes.length ? fallbackGraphemes.slice(0, 64).join('') : 'ASTRIT';
+  }
+  return graphemes.slice(0, 64).join('');
+};
+
 const normalizeRampEntries = (entries: unknown): CustomRampEntry[] => {
   if (!Array.isArray(entries)) {
     return DEFAULT_CUSTOM_RAMP.map((entry) => ({ ...entry }));
@@ -360,7 +370,7 @@ const sanitizeEngineConfig = (value: unknown, fallback: EngineConfig): EngineCon
     outlineColor: toHexColorSafe(source.outlineColor, fallback.outlineColor),
     mode: toEnumSafe(source.mode, AsciiMode, fallback.mode),
     font: toEnumSafe(source.font, FontType, fallback.font),
-    semanticWord: toStringSafe(source.semanticWord, fallback.semanticWord),
+    semanticWord: normalizeSemanticWord(source.semanticWord, fallback.semanticWord),
     semanticRamp: toBooleanSafe(source.semanticRamp, fallback.semanticRamp),
     customRampEnabled: toBooleanSafe(source.customRampEnabled, fallback.customRampEnabled),
     customSemanticMapping: toBooleanSafe(source.customSemanticMapping, fallback.customSemanticMapping),

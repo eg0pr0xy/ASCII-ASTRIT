@@ -299,6 +299,37 @@ export const LeftPanel: React.FC<LeftPanelProps> = ({
              </div>
 
              <div className="bg-black/40 border border-[var(--border-module)] p-2">
+                 <div className="text-[9px] font-bold text-[var(--text-muted)] uppercase mb-2">Semantic Text</div>
+                 <div className="flex flex-col gap-2 mb-3">
+                   <input
+                     type="text"
+                     value={config.semanticWord}
+                     maxLength={64}
+                     onChange={(e) =>
+                       setConfig((prev) => ({
+                         ...prev,
+                         semanticWord: e.target.value.slice(0, 64) || 'ASTRIT'
+                       }))
+                     }
+                     placeholder="Word used in semantic mode"
+                     className="h-8 bg-black border border-[var(--border-module)] text-[9px] px-2"
+                   />
+                   <div className="grid grid-cols-2 gap-1">
+                     <button
+                       onClick={() => setConfig((prev) => ({ ...prev, mode: AsciiMode.SEMANTIC }))}
+                       className={`text-[8px] py-1 border uppercase transition-all ${config.mode === AsciiMode.SEMANTIC ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black text-[var(--text-secondary)] border-[var(--border-module)]'}`}
+                     >
+                       Use Semantic Mode
+                     </button>
+                     <button
+                       onClick={() => setConfig((prev) => ({ ...prev, semanticRamp: !prev.semanticRamp }))}
+                       className={`text-[8px] py-1 border uppercase transition-all ${config.semanticRamp ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black text-[var(--text-secondary)] border-[var(--border-module)]'}`}
+                     >
+                       Ramp: {config.semanticRamp ? 'Luma' : 'Pattern'}
+                     </button>
+                   </div>
+                 </div>
+
                  <div className="text-[9px] font-bold text-[var(--text-muted)] uppercase mb-2">Character Set Editor</div>
                  <div className="grid grid-cols-2 gap-2 mb-2">
                     <label className="flex items-center gap-2 text-[8px] uppercase text-[var(--text-secondary)]">
