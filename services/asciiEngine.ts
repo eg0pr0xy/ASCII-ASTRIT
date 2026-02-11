@@ -1,4 +1,4 @@
-import { AsciiMode, EngineConfig, ColorMode, DistortionMode, RenderMetrics, DitheringMode } from '../engineTypes';
+import { AsciiMode, EngineConfig, ColorMode, DistortionMode, RenderMetrics, DitheringMode, TemporalDiagnosticsMode, TemporalMetrics } from '../engineTypes';
 import { ASCII_RAMPS, BAYER_MATRIX_4x4 } from '../constants';
 
 type RGB = { r: number; g: number; b: number };
@@ -31,10 +31,22 @@ export class AsciiEngine {
   private prevLumaBuffer = new Float32Array(0);
   private prevEdgeMagnitude = new Float32Array(0);
   private prevCharGrid: string[] = [];
+  private temporalLumaDeltaBuffer = new Float32Array(0);
+  private temporalLockBuffer = new Float32Array(0);
+  private temporalMotionBuffer = new Float32Array(0);
+  private temporalEdgeDeltaBuffer = new Float32Array(0);
+  private temporalHistoryValid = false;
+  private lastTemporalFrameIndex = -1;
+  private lastTemporalSampleLen = 0;
+  private appliedTemporalSignature = '';
+  private cachedTemporalSignature = '';
+  private cachedTemporalSignatureSource: EngineConfig | null = null;
 
   private hexCache = new Map<string, RGB>();
   private paletteCache = new Map<string, RGB[]>();
   private gradientLutCache = new Map<string, string[]>();
+  private rampSymbolCache = new Map<string, string[]>();
+  private graphemeSegmenter: { segment: (input: string) => Iterable<{ segment: string }> } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -51,6 +63,10 @@ export class AsciiEngine {
     const compCtx = this.compositionBuffer.getContext('2d', { alpha: true });
     if (!compCtx) throw new Error('Could not get composition context');
     this.compCtx = compCtx;
+
+    const SegmenterCtor = (Intl as any)?.Segmenter;
+    this.graphemeSegmenter =
+      typeof SegmenterCtor === 'function' ? new SegmenterCtor(undefined, { granularity: 'grapheme' }) : null;
   }
 
   private ensureFloatBuffer(current: Float32Array, length: number): Float32Array {
@@ -156,12 +172,33 @@ export class AsciiEngine {
     return ramp || ASCII_RAMPS.standard;
   }
 
+  private splitGraphemes(input: string): string[] {
+    if (!input) return [];
+    if (this.graphemeSegmenter) {
+      return Array.from(this.graphemeSegmenter.segment(input), (s) => s.segment);
+    }
+    return Array.from(input);
+  }
+
+  private firstGrapheme(input: string): string {
+    const graphemes = this.splitGraphemes(input);
+    return graphemes[0] || ' ';
+  }
+
+  private getRampSymbols(ramp: string): string[] {
+    const cached = this.rampSymbolCache.get(ramp);
+    if (cached) return cached;
+    const symbols = this.splitGraphemes(ramp);
+    this.rampSymbolCache.set(ramp, symbols);
+    return symbols;
+  }
+
   private getCustomRampEntries(config: EngineConfig): Array<{ char: string; brightness: number; semanticValue: string }> {
     if (!config.customRampEnabled || !Array.isArray(config.customRampEntries)) return [];
     return config.customRampEntries
       .filter((entry) => entry && typeof entry.char === 'string' && entry.char.length > 0)
       .map((entry) => ({
-        char: entry.char.slice(0, 1),
+        char: this.firstGrapheme(entry.char),
         brightness: this.clamp01(typeof entry.brightness === 'number' ? entry.brightness : 0),
         semanticValue: typeof entry.semanticValue === 'string' ? entry.semanticValue : ''
       }))
@@ -233,6 +270,181 @@ export class AsciiEngine {
     for (let i = 0; i < current.length; i++) {
       current[i] = current[i] * keepCurrent + previous[i] * amount;
     }
+  }
+
+  private computeTemporalMotionScore(lumaDelta: number, edgeDeltaNorm: number): number {
+    const lumaNorm = this.clamp01(lumaDelta / 0.35);
+    return this.clamp01(lumaNorm * 0.65 + this.clamp01(edgeDeltaNorm) * 0.35);
+  }
+
+  private getTemporalSignature(config: EngineConfig): string {
+    if (this.cachedTemporalSignatureSource === config) return this.cachedTemporalSignature;
+
+    const rampSignature = config.customRampEnabled
+      ? config.customRampEntries
+          .map((entry) => {
+            const char = this.firstGrapheme(entry.char || ' ');
+            const brightness = this.clamp01(typeof entry.brightness === 'number' ? entry.brightness : 0).toFixed(4);
+            const semantic = (entry.semanticValue || '').trim().toLowerCase();
+            return `${char}:${brightness}:${semantic}`;
+          })
+          .join(',')
+      : '';
+
+    this.cachedTemporalSignature = [
+      config.seed,
+      config.mode,
+      config.resolution,
+      config.inverted ? 1 : 0,
+      config.brightness.toFixed(4),
+      config.contrast.toFixed(4),
+      config.hue.toFixed(2),
+      config.saturation.toFixed(4),
+      config.lightness.toFixed(4),
+      config.gamma.toFixed(4),
+      config.dithering.toFixed(4),
+      config.ditheringMode,
+      config.colorizeDither ? 1 : 0,
+      config.outlineEnabled ? 1 : 0,
+      config.outlineSensitivity.toFixed(4),
+      config.colorMode,
+      config.palette.join(','),
+      config.distortion,
+      config.distortionStrength.toFixed(4),
+      config.semanticWord || '',
+      config.semanticRamp ? 1 : 0,
+      config.customRampEnabled ? 1 : 0,
+      config.customSemanticMapping ? 1 : 0,
+      config.customRampName || '',
+      rampSignature
+    ].join('|');
+    this.cachedTemporalSignatureSource = config;
+    return this.cachedTemporalSignature;
+  }
+
+  private resetTemporalState(sampleLen: number): void {
+    this.prevLumaBuffer = this.ensureFloatBuffer(this.prevLumaBuffer, sampleLen);
+    this.prevLumaBuffer.fill(0);
+
+    this.prevEdgeMagnitude = this.ensureFloatBuffer(this.prevEdgeMagnitude, sampleLen);
+    this.prevEdgeMagnitude.fill(0);
+
+    if (this.prevCharGrid.length !== sampleLen) {
+      this.prevCharGrid = new Array<string>(sampleLen).fill(' ');
+    } else {
+      this.prevCharGrid.fill(' ');
+    }
+
+    this.temporalLumaDeltaBuffer = this.ensureFloatBuffer(this.temporalLumaDeltaBuffer, sampleLen);
+    this.temporalLockBuffer = this.ensureFloatBuffer(this.temporalLockBuffer, sampleLen);
+    this.temporalMotionBuffer = this.ensureFloatBuffer(this.temporalMotionBuffer, sampleLen);
+    this.temporalEdgeDeltaBuffer = this.ensureFloatBuffer(this.temporalEdgeDeltaBuffer, sampleLen);
+    this.temporalLumaDeltaBuffer.fill(0);
+    this.temporalLockBuffer.fill(0);
+    this.temporalMotionBuffer.fill(0);
+    this.temporalEdgeDeltaBuffer.fill(0);
+
+    this.temporalHistoryValid = false;
+    this.lastTemporalFrameIndex = -1;
+    this.lastTemporalSampleLen = sampleLen;
+  }
+
+  private drawTemporalDiagnosticsOverlay(
+    config: EngineConfig,
+    cols: number,
+    rows: number,
+    resolution: number,
+    renderW: number,
+    renderH: number,
+    hasTemporalHistory: boolean,
+    temporalSummary?: TemporalMetrics
+  ): void {
+    if (!config.temporalDiagnosticsEnabled || !config.temporalEnabled) return;
+    if (cols <= 0 || rows <= 0) return;
+
+    const cw = this.compositionBuffer.width;
+    const ch = this.compositionBuffer.height;
+    if (cw <= 0 || ch <= 0) return;
+
+    const baseOpacity = Math.max(0.05, this.clamp01(config.temporalDiagnosticsOpacity || 0.35));
+    const mode = config.temporalDiagnosticsMode || TemporalDiagnosticsMode.LUMA_DELTA;
+    const scaleX = renderW / cw;
+    const scaleY = renderH / ch;
+    const cellW = resolution * scaleX;
+    const cellH = resolution * scaleY;
+
+    this.ctx.save();
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const idx = y * cols + x;
+        let r = 255;
+        let g = 255;
+        let b = 255;
+        let alpha = baseOpacity;
+
+        if (mode === TemporalDiagnosticsMode.CHAR_LOCK) {
+          const locked = this.temporalLockBuffer[idx] > 0.5;
+          if (locked) {
+            r = 0;
+            g = 220;
+            b = 255;
+            alpha = baseOpacity * 0.85;
+          } else {
+            r = 255;
+            g = 42;
+            b = 88;
+            alpha = baseOpacity * 0.22;
+          }
+        } else if (mode === TemporalDiagnosticsMode.EDGE_STABILITY) {
+          const stability = this.clamp01(1 - this.temporalEdgeDeltaBuffer[idx]);
+          r = Math.round((1 - stability) * 255);
+          g = Math.round(stability * 230);
+          b = 70;
+          alpha = baseOpacity * 0.75;
+        } else if (mode === TemporalDiagnosticsMode.MOTION) {
+          const motion = this.clamp01(this.temporalMotionBuffer[idx]);
+          r = Math.round(140 + motion * 115);
+          g = Math.round((1 - motion) * 120);
+          b = Math.round(200 + motion * 55);
+          alpha = baseOpacity * (0.25 + motion * 0.75);
+        } else {
+          const delta = this.clamp01(this.temporalLumaDeltaBuffer[idx] / 0.35);
+          r = Math.round(delta * 255);
+          g = Math.round((1 - delta) * 220 + 20);
+          b = 30;
+          alpha = baseOpacity * (0.2 + delta * 0.8);
+        }
+
+        this.ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+        this.ctx.fillRect(x * cellW, y * cellH, cellW + 0.35, cellH + 0.35);
+      }
+    }
+
+    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.62)';
+    this.ctx.fillRect(10, 10, 280, 66);
+    this.ctx.strokeStyle = 'rgba(255, 241, 232, 0.35)';
+    this.ctx.strokeRect(10, 10, 280, 66);
+    this.ctx.fillStyle = '#fff1e8';
+    this.ctx.font = '11px monospace';
+    this.ctx.textBaseline = 'top';
+    this.ctx.fillText(`TEMP DBG: ${mode.replace(/_/g, ' ')}`, 18, 18);
+    if (!hasTemporalHistory || !temporalSummary) {
+      this.ctx.fillText('WARMUP: waiting for history frame', 18, 34);
+    } else {
+      this.ctx.fillText(
+        `LOCK ${(temporalSummary.lockRatio * 100).toFixed(1)}%  MOT ${(temporalSummary.meanMotion * 100).toFixed(1)}%`,
+        18,
+        34
+      );
+      this.ctx.fillText(
+        `LUMA ${temporalSummary.meanLumaDelta.toFixed(3)}  EDGE ${(temporalSummary.meanEdgeDelta * 100).toFixed(1)}%`,
+        18,
+        48
+      );
+    }
+
+    this.ctx.restore();
   }
 
   private applyGrading(data: Uint8ClampedArray, target: Float32Array, config: EngineConfig): void {
@@ -453,7 +665,8 @@ export class AsciiEngine {
 
     if (mode === AsciiMode.MATRIX) {
       if (brightness < 0.1) return ' ';
-      const ramp = ASCII_RAMPS.katakana;
+      const ramp = this.getRampSymbols(ASCII_RAMPS.katakana);
+      if (!ramp.length) return ' ';
       const pxHash = hash3(x, y, config.seed);
       const columnSpeed = hash3(x, 0, config.seed) * 0.5 + 0.2;
       const signal = Math.sin(y * 0.1 - frameIndex * (0.08 * columnSpeed) + config.seed);
@@ -469,7 +682,8 @@ export class AsciiEngine {
       let b = brightness;
       if (!config.inverted) b = Math.pow(b, 0.8);
       b = this.clamp01((b - 0.5) * 1.15 + 0.5);
-      const ramp = ASCII_RAMPS.blocks;
+      const ramp = this.getRampSymbols(ASCII_RAMPS.blocks);
+      if (!ramp.length) return ' ';
       const index = Math.floor(b * (ramp.length - 1));
       return ramp[Math.max(0, Math.min(index, ramp.length - 1))];
     }
@@ -478,7 +692,8 @@ export class AsciiEngine {
       return this.getCharFromCustomRamp(brightness, customRampEntries, config.inverted);
     }
 
-    const ramp = this.getRamp(mode);
+    const ramp = this.getRampSymbols(this.getRamp(mode));
+    if (!ramp.length) return ' ';
     const b = config.inverted ? 1.0 - brightness : brightness;
     const index = Math.floor(b * (ramp.length - 1));
     return ramp[Math.max(0, Math.min(index, ramp.length - 1))];
@@ -491,7 +706,8 @@ export class AsciiEngine {
     height: number,
     frameIndex: number,
     brushCanvas?: HTMLCanvasElement,
-    shockProgress?: number
+    shockProgress?: number,
+    renderDiagnosticsOverlay = true
   ): { charCounts: Record<string, number>; metrics: RenderMetrics } {
     if (!source && !brushCanvas) {
       return { charCounts: {}, metrics: { averageLuminance: 0, density: 0, entropy: 0, dominantColor: '#000000' } };
@@ -541,15 +757,46 @@ export class AsciiEngine {
     const rawData = this.offCtx.getImageData(0, 0, cols, rows).data;
     const pixelStrideLen = cols * rows * 4;
     const sampleLen = cols * rows;
+    const disciplinedFrameIndex = Number.isFinite(frameIndex) ? Math.max(0, Math.floor(frameIndex)) : 0;
     const temporalEnabled = Boolean(config.temporalEnabled);
     const temporalBlend = this.clamp01(config.temporalBlend || 0);
     const characterInertia = this.clamp01(config.characterInertia || 0);
     const edgeTemporalBlend = this.clamp01(config.edgeTemporalStability || 0);
+    const temporalDiagnosticsEnabled = temporalEnabled && Boolean(config.temporalDiagnosticsEnabled);
+    const adaptiveInertiaEnabled = temporalEnabled && Boolean(config.adaptiveInertiaEnabled);
+    const adaptiveInertiaStrength = this.clamp01(config.adaptiveInertiaStrength || 0);
+    const temporalGhostClamp = this.clamp01(config.temporalGhostClamp || 0);
+    const temporalSignature = this.getTemporalSignature(config);
+    const temporalConfigChanged = temporalSignature !== this.appliedTemporalSignature;
+    const temporalSampleLenChanged = this.lastTemporalSampleLen !== sampleLen;
+    const temporalFrameDiscontinuity =
+      this.lastTemporalFrameIndex >= 0 && disciplinedFrameIndex !== this.lastTemporalFrameIndex + 1;
+    const requiresTemporalReset =
+      temporalEnabled &&
+      (!this.temporalHistoryValid || temporalConfigChanged || temporalSampleLenChanged || temporalFrameDiscontinuity);
+
+    if (requiresTemporalReset) {
+      this.resetTemporalState(sampleLen);
+      this.appliedTemporalSignature = temporalSignature;
+    }
 
     const hasTemporalHistory =
       temporalEnabled &&
+      this.temporalHistoryValid &&
       this.prevLumaBuffer.length === sampleLen &&
       this.prevCharGrid.length === sampleLen;
+
+    const trackTemporalSignals = temporalDiagnosticsEnabled || adaptiveInertiaEnabled;
+    if (trackTemporalSignals) {
+      this.temporalLumaDeltaBuffer = this.ensureFloatBuffer(this.temporalLumaDeltaBuffer, sampleLen);
+      this.temporalLockBuffer = this.ensureFloatBuffer(this.temporalLockBuffer, sampleLen);
+      this.temporalMotionBuffer = this.ensureFloatBuffer(this.temporalMotionBuffer, sampleLen);
+      this.temporalEdgeDeltaBuffer = this.ensureFloatBuffer(this.temporalEdgeDeltaBuffer, sampleLen);
+      this.temporalLumaDeltaBuffer.fill(0);
+      this.temporalLockBuffer.fill(0);
+      this.temporalMotionBuffer.fill(0);
+      this.temporalEdgeDeltaBuffer.fill(0);
+    }
 
     this.gradedBuffer = this.ensureFloatBuffer(this.gradedBuffer, pixelStrideLen);
     this.lumaBuffer = this.ensureFloatBuffer(this.lumaBuffer, sampleLen);
@@ -604,12 +851,18 @@ export class AsciiEngine {
       : [];
     const currentCharGrid = temporalEnabled ? new Array<string>(sampleLen).fill(' ') : null;
 
-    this.compCtx.font = `${resolution}px ${config.font}, monospace`;
+    this.compCtx.font = `${resolution}px ${config.font}, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", monospace`;
     this.compCtx.textBaseline = 'top';
 
     const charCounts: Record<string, number> = {};
     let lastFillStyle = '';
     let nonSpaceChars = 0;
+    let temporalLockCount = 0;
+    let temporalDecisionCount = 0;
+    let temporalSampleCount = 0;
+    let temporalLumaDeltaSum = 0;
+    let temporalEdgeDeltaSum = 0;
+    let temporalMotionSum = 0;
 
     for (let y = 0; y < rows; y++) {
       let rowOffset = 0;
@@ -630,7 +883,7 @@ export class AsciiEngine {
           lookupX += (hash3(x, y, config.seed) - 0.5) * strength * 20;
           lookupY += (hash3(x, y, config.seed + 1) - 0.5) * strength * 20;
         } else if (config.distortion === DistortionMode.WAVE) {
-          lookupX += Math.sin(y * 0.1 + frameIndex * 0.15) * strength * 10;
+          lookupX += Math.sin(y * 0.1 + disciplinedFrameIndex * 0.15) * strength * 10;
         } else if (config.distortion === DistortionMode.TWIST) {
           const cx = cols * 0.5;
           const cy = rows * 0.5;
@@ -644,9 +897,9 @@ export class AsciiEngine {
           lookupX = cx + dx * cosT - dy * sinT;
           lookupY = cy + dx * sinT + dy * cosT;
         } else if (config.distortion === DistortionMode.VHS) {
-          const band = Math.sin(y * 0.18 + frameIndex * 0.04 + config.seed);
+          const band = Math.sin(y * 0.18 + disciplinedFrameIndex * 0.04 + config.seed);
           lookupX += band * strength * 6;
-          const tearSeed = hash3(Math.floor(x / 3), y, config.seed + frameIndex);
+          const tearSeed = hash3(Math.floor(x / 3), y, config.seed + disciplinedFrameIndex);
           if (tearSeed < 0.02 * strength) {
             lookupX += (hash3(x, y, config.seed + 17) - 0.5) * strength * 50;
           }
@@ -662,6 +915,29 @@ export class AsciiEngine {
           luminance = this.clamp01(luminance + bayer);
         }
 
+        const prevLum = hasTemporalHistory ? this.prevLumaBuffer[gridIdx] ?? luminance : luminance;
+        const lumaDelta = hasTemporalHistory ? Math.abs(luminance - prevLum) : 0;
+        let edgeDeltaNorm = 0;
+        if (hasTemporalHistory && edgeData && this.prevEdgeMagnitude.length === sampleLen) {
+          const prevEdge = this.prevEdgeMagnitude[gridIdx] ?? 0;
+          const currEdge = edgeData.magnitude[lIdx] ?? 0;
+          edgeDeltaNorm = this.clamp01(Math.abs(currEdge - prevEdge) / SOBEL_MAX_MAGNITUDE);
+        }
+        const motionScore = hasTemporalHistory ? this.computeTemporalMotionScore(lumaDelta, edgeDeltaNorm) : 0;
+
+        if (hasTemporalHistory) {
+          temporalSampleCount++;
+          temporalLumaDeltaSum += lumaDelta;
+          temporalEdgeDeltaSum += edgeDeltaNorm;
+          temporalMotionSum += motionScore;
+        }
+        if (trackTemporalSignals) {
+          this.temporalLumaDeltaBuffer[gridIdx] = lumaDelta;
+          this.temporalEdgeDeltaBuffer[gridIdx] = edgeDeltaNorm;
+          this.temporalMotionBuffer[gridIdx] = motionScore;
+          this.temporalLockBuffer[gridIdx] = 0;
+        }
+
         let char = ' ';
         let isEdge = false;
         if (edgeData && edgeData.magnitude[lIdx] > edgeThreshold) {
@@ -672,17 +948,35 @@ export class AsciiEngine {
           else if (angle < 112.5) char = '-';
           else char = '\\';
         } else {
-          char = this.getChar(luminance, config, x, y, frameIndex, customRampEntries, semanticTokens);
+          char = this.getChar(luminance, config, x, y, disciplinedFrameIndex, customRampEntries, semanticTokens);
         }
 
         if (hasTemporalHistory && characterInertia > 0 && shockIntensity === 0) {
           const previousChar = this.prevCharGrid[gridIdx] || ' ';
           if (previousChar !== char) {
-            const prevLum = this.prevLumaBuffer[gridIdx] ?? luminance;
-            const lumDelta = Math.abs(luminance - prevLum);
-            const inertiaThreshold = 0.02 + characterInertia * 0.25;
-            if (lumDelta < inertiaThreshold) {
+            temporalDecisionCount++;
+            const baseInertiaThreshold = 0.02 + characterInertia * 0.25;
+            let inertiaThreshold = baseInertiaThreshold;
+            let allowPersistence = true;
+
+            if (adaptiveInertiaEnabled) {
+              const currentEdgeNorm = edgeData ? this.clamp01((edgeData.magnitude[lIdx] ?? 0) / SOBEL_MAX_MAGNITUDE) : 0;
+              const adaptiveMotionScale = 1 - adaptiveInertiaStrength * motionScore;
+              const adaptiveContrastScale = 1 - adaptiveInertiaStrength * 0.5 * currentEdgeNorm;
+              inertiaThreshold = baseInertiaThreshold * Math.max(0.1, adaptiveMotionScale * adaptiveContrastScale);
+
+              const ghostCutoff = 0.2 + temporalGhostClamp * 0.55;
+              if (motionScore > ghostCutoff) {
+                allowPersistence = false;
+              }
+            }
+
+            if (allowPersistence && lumaDelta < inertiaThreshold) {
               char = previousChar;
+              temporalLockCount++;
+              if (trackTemporalSignals) {
+                this.temporalLockBuffer[gridIdx] = 1;
+              }
             }
           }
         }
@@ -748,11 +1042,28 @@ export class AsciiEngine {
       }
 
       this.prevCharGrid = currentCharGrid || [];
+      this.temporalHistoryValid = true;
+      this.lastTemporalFrameIndex = disciplinedFrameIndex;
+      this.lastTemporalSampleLen = sampleLen;
+      this.appliedTemporalSignature = temporalSignature;
     } else {
       this.prevLumaBuffer = new Float32Array(0);
       this.prevEdgeMagnitude = new Float32Array(0);
       this.prevCharGrid = [];
+      this.temporalHistoryValid = false;
+      this.lastTemporalFrameIndex = -1;
+      this.lastTemporalSampleLen = 0;
+      this.appliedTemporalSignature = '';
     }
+
+    const temporalSummary: TemporalMetrics | undefined = temporalEnabled
+      ? {
+          lockRatio: temporalDecisionCount > 0 ? temporalLockCount / temporalDecisionCount : 0,
+          meanLumaDelta: temporalSampleCount > 0 ? temporalLumaDeltaSum / temporalSampleCount : 0,
+          meanEdgeDelta: temporalSampleCount > 0 ? temporalEdgeDeltaSum / temporalSampleCount : 0,
+          meanMotion: temporalSampleCount > 0 ? temporalMotionSum / temporalSampleCount : 0
+        }
+      : undefined;
 
     this.ctx.clearRect(0, 0, renderW, renderH);
 
@@ -777,6 +1088,18 @@ export class AsciiEngine {
     this.ctx.filter = baseFilter;
     this.ctx.drawImage(this.compositionBuffer, 0, 0, renderW, renderH);
     this.ctx.restore();
+    if (temporalDiagnosticsEnabled && renderDiagnosticsOverlay) {
+      this.drawTemporalDiagnosticsOverlay(
+        config,
+        cols,
+        rows,
+        resolution,
+        renderW,
+        renderH,
+        hasTemporalHistory,
+        temporalSummary
+      );
+    }
 
     let lumSum = 0;
     for (let i = 0; i < this.lumaBuffer.length; i++) lumSum += this.lumaBuffer[i];
@@ -800,7 +1123,7 @@ export class AsciiEngine {
     const avgB = (sumB / sampleCount) * 255;
     const dominantColor = this.rgbToHex(avgR, avgG, avgB);
 
-    return { charCounts, metrics: { averageLuminance: avgLum, density, entropy, dominantColor } };
+    return { charCounts, metrics: { averageLuminance: avgLum, density, entropy, dominantColor, temporal: temporalSummary } };
   }
 
   public async triggerStaticRender(source: any, config: EngineConfig, w: number, h: number, brush?: any): Promise<Blob | null> {
@@ -808,7 +1131,7 @@ export class AsciiEngine {
     tempCanvas.width = w;
     tempCanvas.height = h;
     const engine = new AsciiEngine(tempCanvas);
-    engine.render(source, config, w, h, 0, brush);
+    engine.render(source, config, w, h, 0, brush, undefined, false);
     return new Promise<Blob | null>((resolve) => {
       tempCanvas.toBlob(resolve, 'image/png', 1.0);
     });

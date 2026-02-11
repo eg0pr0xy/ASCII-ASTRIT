@@ -38,11 +38,29 @@ interface SliderProps {
 }
 
 export const PixelSlider: React.FC<SliderProps> = ({ label, value, min, max, step = 1, onChange }) => {
+  const toSafeNumber = (input: unknown, fallback: number) => {
+    try {
+      const parsed = typeof input === 'number' ? input : Number(input);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  const safeMin = toSafeNumber(min, 0);
+  const safeMax = toSafeNumber(max, safeMin + 1);
+  const safeStep = Math.max(0.0001, toSafeNumber(step, 1));
+  const rawValue = toSafeNumber(value, safeMin);
+  const clampedValue = Math.max(safeMin, Math.min(safeMax, rawValue));
+  const range = Math.max(0.0001, safeMax - safeMin);
+  const progress = ((clampedValue - safeMin) / range) * 100;
+  const decimals = safeStep >= 1 ? 0 : Math.min(4, (safeStep.toString().split('.')[1] || '').length);
+  const displayValue = clampedValue.toFixed(decimals).replace(/\.?0+$/, '');
+
   return (
     <div className="flex flex-col gap-2 mb-5">
       <div className="flex justify-between text-[10px] text-[var(--text-muted)] font-bold tracking-wider">
         <span className="uppercase">{label}</span>
-        <span className="font-mono text-[var(--bg-app)] bg-[var(--highlight)] px-1">{value}</span>
+        <span className="font-mono text-[var(--bg-app)] bg-[var(--highlight)] px-1">{displayValue}</span>
       </div>
       <div className="relative h-6 flex items-center">
         {/* Track */}
@@ -50,18 +68,18 @@ export const PixelSlider: React.FC<SliderProps> = ({ label, value, min, max, ste
         {/* Input */}
         <input
             type="range"
-            min={min}
-            max={max}
-            step={step}
-            value={value}
-            onChange={(e) => onChange(parseFloat(e.target.value))}
+            min={safeMin}
+            max={safeMax}
+            step={safeStep}
+            value={clampedValue}
+            onChange={(e) => onChange(toSafeNumber(e.target.value, clampedValue))}
             className="w-full h-full appearance-none bg-transparent cursor-pointer z-10 opacity-0"
         />
         {/* Custom Thumb visual based on position */}
         <div 
             className="absolute h-6 w-3 bg-[var(--text-muted)] border-t-2 border-l-2 border-[var(--text-primary)] border-b-2 border-r-2 border-[var(--border-module)] shadow-[2px_2px_5px_var(--shadow-color)] pointer-events-none"
             style={{ 
-                left: `calc(${((value - min) / (max - min)) * 100}% - 6px)` 
+                left: `calc(${progress}% - 6px)` 
             }}
         >
             <div className="w-full h-[2px] bg-[var(--border-module)] mt-2"></div>

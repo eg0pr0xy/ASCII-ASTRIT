@@ -1,15 +1,16 @@
 
-import { PICO_COLORS, FontType, ThemeMode, ColorMode, DistortionMode, DitheringMode, CustomRampEntry } from './engineTypes';
+import { PICO_COLORS, FontType, ThemeMode, ColorMode, DistortionMode, DitheringMode, CustomRampEntry, TemporalDiagnosticsMode, RenderEngine } from './engineTypes';
 import type { PostProcessConfig } from './engineTypes';
 
 export const ENGINE_VERSION = "3.5.0";
+export const SERIALIZATION_SCHEMA_VERSION = 1;
 
 export const ASCII_RAMPS = {
   standard: " .:-=+*#%@",
   dense: "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ",
   blocks: " ░▒▓█",
   wire: " .`'-,|/_\\",
-  emoji: " ⚫️🟤🟣🔵🟢🟡🟠🔴⚪️",
+  emoji: " 😶😐🙂😊😀😄😁😆😂🤣",
   ultra: " ⚡️★✦❂❉❄︎☻☹☯⚙⚔⚓︎",
   // Tech
   matrix: " 0123456789abcdefghijklmnopqrstuvwxyz", 
@@ -103,6 +104,7 @@ export const DEFAULT_POST_PROCESS: PostProcessConfig = {
 
 export const PRESETS = {
   DEFAULT: {
+    renderEngine: RenderEngine.NATIVE,
     seed: 42,
     mode: 'PICO_ASCII',
     resolution: 12,
@@ -134,6 +136,12 @@ export const PRESETS = {
     temporalBlend: 0.35,
     characterInertia: 0.35,
     edgeTemporalStability: 0.2,
+    temporalDiagnosticsEnabled: false,
+    temporalDiagnosticsMode: TemporalDiagnosticsMode.LUMA_DELTA,
+    temporalDiagnosticsOpacity: 0.35,
+    adaptiveInertiaEnabled: true,
+    adaptiveInertiaStrength: 0.55,
+    temporalGhostClamp: 0.45,
     font: FontType.JETBRAINS,
     postProcess: { ...DEFAULT_POST_PROCESS },
     transparentBackground: false,

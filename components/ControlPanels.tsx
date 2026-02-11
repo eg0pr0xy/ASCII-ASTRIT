@@ -1,9 +1,9 @@
 
 import React, { useState } from 'react';
 import { PixelButton, PanelModule, PixelSlider } from './UIComponents';
-import { EngineConfig, AsciiMode, BrushType, FontType, ColorMode, DistortionMode, PrintDPI, DitheringMode, PaperSize, CustomRampEntry } from '../engineTypes';
+import { EngineConfig, AsciiMode, BrushType, FontType, ColorMode, DistortionMode, PrintDPI, DitheringMode, PaperSize, CustomRampEntry, TemporalDiagnosticsMode, RenderEngine } from '../engineTypes';
 import { COLOR_PALETTES } from '../constants';
-import { 
+import {
   Image as ImageIcon, 
   Camera,
   Activity,
@@ -32,8 +32,25 @@ import {
   Square,
   Pipette,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Film
 } from 'lucide-react';
+
+const splitGraphemes = (value: string): string[] => {
+  if (!value) return [];
+  const SegmenterCtor = (Intl as any)?.Segmenter;
+  if (typeof SegmenterCtor === 'function') {
+    const segmenter = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+    const segments = segmenter.segment(value) as Iterable<{ segment: string }>;
+    return Array.from(segments, (s) => s.segment);
+  }
+  return Array.from(value);
+};
+
+const firstGrapheme = (value: string, fallback = ' '): string => {
+  const graphemes = splitGraphemes(value);
+  return graphemes[0] || fallback;
+};
 
 interface LeftPanelProps {
   config: EngineConfig;
@@ -157,7 +174,7 @@ export const LeftPanel: React.FC<LeftPanelProps> = ({
   };
 
   return (
-    <div className="w-80 h-full bg-[var(--bg-panel)] border-r-4 border-[var(--border-panel)] p-3 flex flex-col gap-4 overflow-y-auto z-20">
+    <div className="w-full lg:w-72 xl:w-80 h-full bg-[var(--bg-panel)] border-r-4 border-[var(--border-panel)] p-3 flex flex-col gap-4 overflow-y-auto z-20">
       <div className="bg-[var(--bg-module)] border-2 border-[var(--border-module)] p-3 text-center mb-2 shadow-[4px_4px_0_var(--shadow-color)] relative">
         <h1 className="text-3xl font-['JetBrains_Mono'] font-bold tracking-[0.18em] text-[var(--accent)] leading-none">ASTRIT</h1>
       </div>
@@ -357,8 +374,8 @@ export const LeftPanel: React.FC<LeftPanelProps> = ({
                           <input
                             type="text"
                             value={entry.char}
-                            maxLength={1}
-                            onChange={(e) => updateRampEntry(entry.id, { char: (e.target.value || ' ').slice(0, 1) })}
+                            maxLength={8}
+                            onChange={(e) => updateRampEntry(entry.id, { char: firstGrapheme(e.target.value || ' ', ' ') })}
                             className="h-7 bg-black border border-[var(--border-module)] text-[11px] text-center"
                             title="Character"
                           />
@@ -461,6 +478,7 @@ interface RightPanelProps {
   setBrush: (b: BrushType) => void;
   onExport: () => void;
   onExportHD: (size: string) => void;
+  onExportGIF: (size: string) => void;
   onSocialCard: () => void;
   onContactSheet: () => void;
   onExportSVG: () => void;
@@ -471,18 +489,77 @@ interface RightPanelProps {
   dpi: PrintDPI;
   setDpi: (d: PrintDPI) => void;
   isExporting: boolean;
+  exportFramingMode: 'CONTAIN' | 'COVER';
+  setExportFramingMode: (mode: 'CONTAIN' | 'COVER') => void;
+  recordingDurationMode: 'INFINITE' | 'ORIGINAL' | 'LOOPS';
+  setRecordingDurationMode: (mode: 'INFINITE' | 'ORIGINAL' | 'LOOPS') => void;
+  recordingLoops: number;
+  setRecordingLoops: (loops: number) => void;
+  canUseTimedRecording: boolean;
+  sourceVideoDuration: number | null;
+  gifFps: number;
+  setGifFps: (value: number) => void;
+  gifQuality: number;
+  setGifQuality: (value: number) => void;
+  gifSourceLoops: number;
+  setGifSourceLoops: (value: number) => void;
+  gifRepeatCount: number;
+  setGifRepeatCount: (value: number) => void;
 }
 
 export const RightPanel: React.FC<RightPanelProps> = ({
   config, setConfig, brush, setBrush,
-  onExport, onExportHD, onSocialCard, onContactSheet,
+  onExport, onExportHD, onExportGIF, onSocialCard, onContactSheet,
   onExportSVG, onShock, onClearBrush, onRecordVideo,
-  isRecording, dpi, setDpi, isExporting
+  isRecording, dpi, setDpi, isExporting, exportFramingMode, setExportFramingMode,
+  recordingDurationMode, setRecordingDurationMode, recordingLoops, setRecordingLoops,
+  canUseTimedRecording, sourceVideoDuration,
+  gifFps, setGifFps, gifQuality, setGifQuality, gifSourceLoops, setGifSourceLoops, gifRepeatCount, setGifRepeatCount
 }) => {
   const [exportSize, setExportSize] = useState<string>("SOURCE");
+  const [primaryExportFormat, setPrimaryExportFormat] = useState<'WEBM' | 'PNG' | 'GIF'>('WEBM');
+  const isMainBusy = primaryExportFormat === 'WEBM' ? false : isExporting;
+
+  const handlePrimaryExport = () => {
+    if (primaryExportFormat === 'WEBM') {
+      onRecordVideo();
+      return;
+    }
+    if (primaryExportFormat === 'PNG') {
+      onExportHD(exportSize);
+      return;
+    }
+    onExportGIF(exportSize);
+  };
+
+  const primaryExportLabel =
+    primaryExportFormat === 'WEBM'
+      ? (isRecording ? 'STOP WEBM' : 'EXPORT WEBM')
+      : primaryExportFormat === 'PNG'
+        ? (isExporting ? 'BUSY...' : 'EXPORT PNG')
+        : (isExporting ? 'BUSY...' : 'EXPORT GIF');
 
   return (
-    <div className="w-80 h-full bg-[var(--bg-panel)] border-l-4 border-[var(--border-panel)] p-3 flex flex-col gap-4 overflow-y-auto z-20">
+    <div className="w-full lg:w-72 xl:w-80 h-full bg-[var(--bg-panel)] border-l-4 border-[var(--border-panel)] p-3 flex flex-col gap-4 overflow-y-auto z-20">
+      <PanelModule title="Renderer" headerColor="var(--highlight)">
+         <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => setConfig((p) => ({ ...p, renderEngine: RenderEngine.NATIVE }))}
+              className={`text-[8px] py-2 border uppercase transition-all ${config.renderEngine === RenderEngine.NATIVE ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black text-[var(--text-secondary)] border-[var(--border-module)]'}`}
+            >
+              Native
+            </button>
+            <button
+              onClick={() => setConfig((p) => ({ ...p, renderEngine: RenderEngine.TEXTMODE }))}
+              className={`text-[8px] py-2 border uppercase transition-all ${config.renderEngine === RenderEngine.TEXTMODE ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black text-[var(--text-secondary)] border-[var(--border-module)]'}`}
+            >
+              Textmode
+            </button>
+         </div>
+         <div className="mt-2 text-[8px] uppercase text-[var(--text-muted)]">
+           Textmode mode prioritizes style speed; some native-only effects are skipped.
+         </div>
+      </PanelModule>
 
       <PanelModule title="Engine Mode" headerColor="var(--accent)">
          <div className="grid grid-cols-2 gap-1 max-h-48 overflow-y-auto pr-1">
@@ -565,6 +642,51 @@ export const RightPanel: React.FC<RightPanelProps> = ({
               <PixelSlider label="Blend" value={config.temporalBlend} min={0} max={0.95} step={0.01} onChange={v => setConfig(p => ({ ...p, temporalBlend: v }))} />
               <PixelSlider label="Inertia" value={config.characterInertia} min={0} max={1} step={0.01} onChange={v => setConfig(p => ({ ...p, characterInertia: v }))} />
               <PixelSlider label="Edge Mem" value={config.edgeTemporalStability} min={0} max={1} step={0.01} onChange={v => setConfig(p => ({ ...p, edgeTemporalStability: v }))} />
+
+              <div className="mt-2 bg-black/40 border border-[var(--border-module)] p-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.adaptiveInertiaEnabled}
+                    onChange={e => setConfig(p => ({ ...p, adaptiveInertiaEnabled: e.target.checked }))}
+                  />
+                  <span className="text-[9px] uppercase text-[var(--text-secondary)]">Adaptive Inertia</span>
+                </label>
+                {config.adaptiveInertiaEnabled && (
+                  <div className="mt-1">
+                    <PixelSlider label="Adapt" value={config.adaptiveInertiaStrength} min={0} max={1} step={0.01} onChange={v => setConfig(p => ({ ...p, adaptiveInertiaStrength: v }))} />
+                    <PixelSlider label="Clamp" value={config.temporalGhostClamp} min={0} max={1} step={0.01} onChange={v => setConfig(p => ({ ...p, temporalGhostClamp: v }))} />
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-2 bg-black/40 border border-[var(--border-module)] p-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.temporalDiagnosticsEnabled}
+                    onChange={e => setConfig(p => ({ ...p, temporalDiagnosticsEnabled: e.target.checked }))}
+                  />
+                  <span className="text-[9px] uppercase text-[var(--text-secondary)]">Diagnostics Overlay</span>
+                </label>
+
+                {config.temporalDiagnosticsEnabled && (
+                  <div className="mt-2">
+                    <div className="grid grid-cols-2 gap-1 mb-2">
+                      {Object.values(TemporalDiagnosticsMode).map((mode) => (
+                        <button
+                          key={mode}
+                          onClick={() => setConfig(p => ({ ...p, temporalDiagnosticsMode: mode }))}
+                          className={`text-[8px] py-1 border transition-all ${config.temporalDiagnosticsMode === mode ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black text-[var(--text-secondary)] border-[var(--border-module)]'}`}
+                        >
+                          {mode.replace(/_/g, ' ')}
+                        </button>
+                      ))}
+                    </div>
+                    <PixelSlider label="DBG Op" value={config.temporalDiagnosticsOpacity} min={0.05} max={0.95} step={0.01} onChange={v => setConfig(p => ({ ...p, temporalDiagnosticsOpacity: v }))} />
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -609,23 +731,175 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                <select value={exportSize} onChange={(e) => setExportSize(e.target.value)} className="w-full bg-black border border-[var(--border-module)] text-[var(--text-primary)] text-[10px] p-2 uppercase appearance-none">
                  {Object.keys(PaperSize).map(s => <option key={s} value={s}>{s}</option>)}
                </select>
+
+               {exportSize !== 'SOURCE' && (
+                 <div className="flex gap-1">
+                    <button
+                      onClick={() => setExportFramingMode('CONTAIN')}
+                      className={`flex-1 px-2 py-1 text-[8px] border uppercase ${exportFramingMode === 'CONTAIN' ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                    >
+                      Contain
+                    </button>
+                    <button
+                      onClick={() => setExportFramingMode('COVER')}
+                      className={`flex-1 px-2 py-1 text-[8px] border uppercase ${exportFramingMode === 'COVER' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                    >
+                      Cover
+                    </button>
+                 </div>
+               )}
+
+               <div className="grid grid-cols-3 gap-1">
+                  <button
+                    onClick={() => setPrimaryExportFormat('WEBM')}
+                    className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'WEBM' ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                  >
+                    WebM
+                  </button>
+                  <button
+                    onClick={() => setPrimaryExportFormat('PNG')}
+                    className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'PNG' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                  >
+                    PNG
+                  </button>
+                  <button
+                    onClick={() => setPrimaryExportFormat('GIF')}
+                    className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'GIF' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                  >
+                    GIF
+                  </button>
+               </div>
                
                <PixelButton 
-                label={isExporting ? "BUSY..." : "RENDER"} 
-                onClick={() => onExportHD(exportSize)} 
+                label={primaryExportLabel}
+                onClick={handlePrimaryExport}
                 variant="hardware" 
                 className="w-full" 
-                disabled={isExporting}
-                icon={isExporting ? <Loader2 className="animate-spin" size={14}/> : <Cpu size={14}/>}
+                disabled={isMainBusy || (primaryExportFormat !== 'WEBM' && isRecording)}
+                icon={
+                  primaryExportFormat === 'WEBM'
+                    ? (isRecording ? <Square size={14} className="fill-current" /> : <Video size={14}/>)
+                    : primaryExportFormat === 'PNG'
+                      ? (isExporting ? <Loader2 className="animate-spin" size={14}/> : <Cpu size={14}/>)
+                      : (isExporting ? <Loader2 className="animate-spin" size={14}/> : <Film size={14}/>)
+                }
                />
+
+               <div className="bg-black/40 border border-[var(--border-module)] p-2 flex flex-col gap-2">
+                 <div className="text-[8px] uppercase text-[var(--text-muted)]">GIF Export</div>
+                 <div className="grid grid-cols-2 gap-1">
+                    <div className="flex items-center justify-between border border-[var(--border-module)] px-2 py-1">
+                      <span className="text-[8px] uppercase text-[var(--text-secondary)]">FPS</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={gifFps}
+                        onChange={(e) => setGifFps(Math.max(1, Math.min(30, parseInt(e.target.value || '12', 10))))}
+                        className="w-12 bg-black text-right text-[9px] border border-[var(--border-module)] px-1"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between border border-[var(--border-module)] px-2 py-1">
+                      <span className="text-[8px] uppercase text-[var(--text-secondary)]">Quality</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={gifQuality}
+                        onChange={(e) => setGifQuality(Math.max(1, Math.min(30, parseInt(e.target.value || '10', 10))))}
+                        className="w-12 bg-black text-right text-[9px] border border-[var(--border-module)] px-1"
+                      />
+                    </div>
+                 </div>
+
+                 <div className="grid grid-cols-2 gap-1">
+                    <div className="flex items-center justify-between border border-[var(--border-module)] px-2 py-1">
+                      <span className="text-[8px] uppercase text-[var(--text-secondary)]">Src Loops</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={gifSourceLoops}
+                        onChange={(e) => setGifSourceLoops(Math.max(1, Math.min(20, parseInt(e.target.value || '1', 10))))}
+                        className="w-12 bg-black text-right text-[9px] border border-[var(--border-module)] px-1"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between border border-[var(--border-module)] px-2 py-1">
+                      <span className="text-[8px] uppercase text-[var(--text-secondary)]">Repeat</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={20}
+                        value={gifRepeatCount}
+                        onChange={(e) => setGifRepeatCount(Math.max(0, Math.min(20, parseInt(e.target.value || '0', 10))))}
+                        className="w-12 bg-black text-right text-[9px] border border-[var(--border-module)] px-1"
+                      />
+                    </div>
+                 </div>
+                 <div className="text-[8px] text-[var(--text-muted)] uppercase">
+                   Repeat 0 = Infinite playback
+                 </div>
+                 <div className="text-[8px] text-[var(--text-muted)] uppercase">
+                   Use format selector above and press main export button.
+                 </div>
+               </div>
+
+               <div className="bg-black/40 border border-[var(--border-module)] p-2 flex flex-col gap-2">
+                 <div className="text-[8px] uppercase text-[var(--text-muted)]">Record Length</div>
+                 <div className="grid grid-cols-3 gap-1">
+                    <button
+                      onClick={() => setRecordingDurationMode('INFINITE')}
+                      className={`px-2 py-1 text-[8px] border uppercase ${recordingDurationMode === 'INFINITE' ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                    >
+                      Infinity
+                    </button>
+                    <button
+                      onClick={() => canUseTimedRecording && setRecordingDurationMode('ORIGINAL')}
+                      disabled={!canUseTimedRecording}
+                      className={`px-2 py-1 text-[8px] border uppercase disabled:opacity-40 disabled:cursor-not-allowed ${recordingDurationMode === 'ORIGINAL' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                    >
+                      Original
+                    </button>
+                    <button
+                      onClick={() => canUseTimedRecording && setRecordingDurationMode('LOOPS')}
+                      disabled={!canUseTimedRecording}
+                      className={`px-2 py-1 text-[8px] border uppercase disabled:opacity-40 disabled:cursor-not-allowed ${recordingDurationMode === 'LOOPS' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                    >
+                      Loops
+                    </button>
+                 </div>
+
+                 {recordingDurationMode === 'LOOPS' && (
+                   <div className="flex items-center justify-between gap-2">
+                     <span className="text-[8px] uppercase text-[var(--text-secondary)]">Loop Count</span>
+                     <div className="flex items-center gap-1">
+                       <button
+                         onClick={() => setRecordingLoops(Math.max(1, recordingLoops - 1))}
+                         className="px-2 py-0.5 text-[10px] border border-[var(--border-module)] bg-black"
+                       >
+                         -
+                       </button>
+                       <span className="min-w-[2ch] text-center text-[10px]">{recordingLoops}</span>
+                       <button
+                         onClick={() => setRecordingLoops(Math.min(99, recordingLoops + 1))}
+                         className="px-2 py-0.5 text-[10px] border border-[var(--border-module)] bg-black"
+                       >
+                         +
+                       </button>
+                     </div>
+                   </div>
+                 )}
+
+                 {!canUseTimedRecording && (
+                   <div className="text-[8px] text-[var(--text-muted)] uppercase">Timed modes require an imported video file.</div>
+                 )}
+                 {canUseTimedRecording && sourceVideoDuration && (
+                   <div className="text-[8px] text-[var(--text-muted)] uppercase">
+                     Source: {sourceVideoDuration.toFixed(2)}s
+                   </div>
+                 )}
+               </div>
                
-               <PixelButton 
-                label={isRecording ? "STOP REC" : "RECORD VIDEO"} 
-                onClick={onRecordVideo} 
-                variant={isRecording ? "danger" : "secondary"} 
-                className="w-full" 
-                icon={isRecording ? <Square size={14} className="fill-current" /> : <Video size={14}/>}
-               />
             </div>
          </div>
       </PanelModule>

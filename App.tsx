@@ -4,12 +4,88 @@ import { AsciiCanvas } from './components/AsciiCanvas';
 import { LeftPanel, RightPanel } from './components/ControlPanels';
 import { LandingPage } from './components/LandingPage';
 import { Mascot } from './components/Mascot';
-import { EngineConfig, AsciiMode, BrushType, AppState, AsciiCanvasHandle, FontType, ThemeMode, ColorMode, DistortionMode, PaperSize, PrintDPI, RenderMetrics, ProjectFile, PresetFile, CustomRampEntry } from './engineTypes';
-import { PRESETS, THEMES, PAPER_DIMENSIONS, DEFAULT_POST_PROCESS, DPI_MULTIPLIERS, COLOR_PALETTES, ENGINE_VERSION, DEFAULT_CUSTOM_RAMP } from './constants';
+import { AsciiEngine } from './services/asciiEngine';
+import { EngineConfig, AsciiMode, BrushType, AppState, AsciiCanvasHandle, FontType, ThemeMode, ColorMode, DistortionMode, DitheringMode, PaperSize, PrintDPI, RenderMetrics, ProjectFile, PresetFile, CustomRampEntry, TemporalDiagnosticsMode, RenderEngine } from './engineTypes';
+import { PRESETS, THEMES, PAPER_DIMENSIONS, DEFAULT_POST_PROCESS, DPI_MULTIPLIERS, COLOR_PALETTES, ENGINE_VERSION, SERIALIZATION_SCHEMA_VERSION, DEFAULT_CUSTOM_RAMP } from './constants';
+import GIF from 'gif.js';
+import gifWorkerUrl from 'gif.js/dist/gif.worker.js?url';
+import { SlidersHorizontal, Image as ImageIcon, X } from 'lucide-react';
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const isThemeMode = (value: unknown): value is ThemeMode =>
+  typeof value === 'string' && Object.values(ThemeMode).includes(value as ThemeMode);
+
+const toStringSafe = (value: unknown, fallback: string) => (typeof value === 'string' ? value : fallback);
+const toBooleanSafe = (value: unknown, fallback: boolean) => (typeof value === 'boolean' ? value : fallback);
+const toEnumSafe = <T extends string>(
+  value: unknown,
+  options: Record<string, T>,
+  fallback: T
+): T => (typeof value === 'string' && Object.values(options).includes(value as T) ? (value as T) : fallback);
+const toNumberSafe = (value: unknown, fallback: number, min?: number, max?: number) => {
+  let numeric = fallback;
+  try {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(parsed)) numeric = parsed;
+  } catch {
+    numeric = fallback;
+  }
+  if (min !== undefined) numeric = Math.max(min, numeric);
+  if (max !== undefined) numeric = Math.min(max, numeric);
+  return numeric;
+};
+const toHexColorSafe = (value: unknown, fallback: string) =>
+  typeof value === 'string' && /^#([0-9a-f]{6})$/i.test(value.trim()) ? value.trim() : fallback;
+const toSchemaVersionSafe = (value: unknown, fallback = 0) =>
+  Math.max(0, Math.floor(toNumberSafe(value, fallback, 0, 9999)));
+const normalizePaletteColors = (value: unknown, fallback: string[]): string[] => {
+  if (!Array.isArray(value)) return [...fallback];
+  const normalized = value
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((entry) => /^#([0-9a-f]{6})$/i.test(entry))
+    .slice(0, 32);
+  return normalized.length ? normalized : [...fallback];
+};
+const normalizePaletteStore = (value: unknown): Record<string, string[]> => {
+  if (!isObjectRecord(value)) return {};
+  const normalized: Record<string, string[]> = {};
+  Object.entries(value).forEach(([name, colors]) => {
+    if (!name.trim()) return;
+    const palette = normalizePaletteColors(colors, []);
+    if (palette.length) normalized[name] = palette;
+  });
+  return normalized;
+};
+const sanitizePostProcess = (value: unknown, fallback: EngineConfig['postProcess']): EngineConfig['postProcess'] => {
+  const source = isObjectRecord(value) ? value : {};
+  return {
+    blur: toNumberSafe(source.blur, fallback.blur, 0, 20),
+    pixelate: toNumberSafe(source.pixelate, fallback.pixelate, 0, 32),
+    invert: toNumberSafe(source.invert, fallback.invert, 0, 1),
+    glow: toNumberSafe(source.glow, fallback.glow, 0, 1),
+    saturation: toNumberSafe(source.saturation, fallback.saturation, 0, 6)
+  };
+};
 
 const createRampEntryId = () => `ramp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const splitGraphemes = (value: string): string[] => {
+  if (!value) return [];
+  const SegmenterCtor = (Intl as any)?.Segmenter;
+  if (typeof SegmenterCtor === 'function') {
+    const segmenter = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+    const segments = segmenter.segment(value) as Iterable<{ segment: string }>;
+    return Array.from(segments, (s) => s.segment);
+  }
+  return Array.from(value);
+};
+
+const firstGrapheme = (value: string, fallback = ' '): string => {
+  const graphemes = splitGraphemes(value);
+  return graphemes[0] || fallback;
+};
 
 const normalizeRampEntries = (entries: unknown): CustomRampEntry[] => {
   if (!Array.isArray(entries)) {
@@ -20,7 +96,7 @@ const normalizeRampEntries = (entries: unknown): CustomRampEntry[] => {
     .map((entry, index) => {
       if (!entry || typeof entry !== 'object') return null;
       const source = entry as Partial<CustomRampEntry>;
-      const char = typeof source.char === 'string' && source.char.length > 0 ? source.char.slice(0, 1) : ' ';
+      const char = typeof source.char === 'string' && source.char.length > 0 ? firstGrapheme(source.char, ' ') : ' ';
       const brightnessValue = typeof source.brightness === 'number' ? source.brightness : index / Math.max(1, entries.length - 1);
       const semanticValue = typeof source.semanticValue === 'string' ? source.semanticValue : '';
       const id = typeof source.id === 'string' && source.id.length > 0 ? source.id : createRampEntryId();
@@ -46,9 +122,275 @@ const normalizeCustomRamps = (input: unknown): Record<string, CustomRampEntry[]>
   return result;
 };
 
+const getSourceDimensions = (source: HTMLImageElement | HTMLVideoElement | null): { w: number; h: number } | null => {
+  if (!source) return null;
+  if (source instanceof HTMLImageElement) {
+    const w = source.naturalWidth || source.width;
+    const h = source.naturalHeight || source.height;
+    if (w > 0 && h > 0) return { w, h };
+    return null;
+  }
+  const w = source.videoWidth || source.clientWidth;
+  const h = source.videoHeight || source.clientHeight;
+  if (w > 0 && h > 0) return { w, h };
+  return null;
+};
+
+const waitForVideoMetadata = (video: HTMLVideoElement, timeoutMs = 6000): Promise<boolean> =>
+  new Promise((resolve) => {
+    const immediate = getSourceDimensions(video);
+    if (immediate) {
+      resolve(true);
+      return;
+    }
+
+    let done = false;
+    let timeoutId: number | null = null;
+    const events: Array<keyof HTMLVideoElementEventMap> = ['loadedmetadata', 'loadeddata', 'canplay', 'durationchange', 'resize'];
+    const cleanup = () => {
+      events.forEach((eventName) => video.removeEventListener(eventName, handleReady));
+      video.removeEventListener('error', handleError);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(ok);
+    };
+    const handleReady = () => {
+      finish(Boolean(getSourceDimensions(video)));
+    };
+    const handleError = () => {
+      finish(false);
+    };
+
+    events.forEach((eventName) => video.addEventListener(eventName, handleReady));
+    video.addEventListener('error', handleError, { once: true });
+    timeoutId = window.setTimeout(() => finish(Boolean(getSourceDimensions(video))), timeoutMs);
+
+    // Avoid forcing load() here because it can abort an in-flight play() call.
+    // Metadata events from src/srcObject updates are enough for readiness tracking.
+  });
+
+const resolveSourceDimensions = async (
+  source: HTMLImageElement | HTMLVideoElement | null,
+  waitMs = 6000
+): Promise<{ w: number; h: number } | null> => {
+  const direct = getSourceDimensions(source);
+  if (direct) return direct;
+  if (source instanceof HTMLVideoElement) {
+    const ready = await waitForVideoMetadata(source, waitMs);
+    if (!ready) return null;
+    return getSourceDimensions(source);
+  }
+  return null;
+};
+
+const blobToImage = (blob: Blob): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Failed to decode rendered image blob.'));
+    };
+    img.src = url;
+  });
+
+const seekVideoTo = (video: HTMLVideoElement, time: number): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (!Number.isFinite(time)) {
+      resolve();
+      return;
+    }
+
+    const clamped = Math.max(0, time);
+    let timeoutId: number | null = null;
+
+    const cleanup = () => {
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+
+    const onSeeked = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = () => {
+      cleanup();
+      reject(new Error('Video seek failed.'));
+    };
+
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      resolve();
+    }, 4000);
+
+    try {
+      if (Math.abs(video.currentTime - clamped) < 0.0005) {
+        cleanup();
+        resolve();
+        return;
+      }
+      video.currentTime = clamped;
+    } catch (err) {
+      cleanup();
+      reject(err instanceof Error ? err : new Error('Video seek failed.'));
+    }
+  });
+
+const computeExportDimensions = (
+  sourceWidth: number,
+  sourceHeight: number,
+  selectedSize: string,
+  dpi: PrintDPI,
+  framingMode: ExportFramingMode
+): ExportDimensions => {
+  if (selectedSize === "SOURCE") {
+    const exactW = Math.max(1, Math.round(sourceWidth));
+    const exactH = Math.max(1, Math.round(sourceHeight));
+    return { finalW: exactW, finalH: exactH, renderW: exactW, renderH: exactH };
+  }
+
+  const isPortrait = sourceHeight > sourceWidth;
+  let targetW = sourceWidth;
+  let targetH = sourceHeight;
+
+  if (PAPER_DIMENSIONS[selectedSize]) {
+    const dim = PAPER_DIMENSIONS[selectedSize];
+    if (isPortrait) {
+      targetW = Math.min(dim.w, dim.h);
+      targetH = Math.max(dim.w, dim.h);
+    } else {
+      targetW = Math.max(dim.w, dim.h);
+      targetH = Math.min(dim.w, dim.h);
+    }
+  }
+
+  const scaleMultiplier = dpi === PrintDPI.SCREEN ? DPI_MULTIPLIERS.SCREEN : DPI_MULTIPLIERS.PRINT;
+  const finalW = Math.max(1, Math.round(targetW * scaleMultiplier));
+  const finalH = Math.max(1, Math.round(targetH * scaleMultiplier));
+  let renderW = finalW;
+  let renderH = finalH;
+
+  const sourceAspect = sourceWidth / Math.max(1, sourceHeight);
+  const targetAspect = finalW / Math.max(1, finalH);
+  if (framingMode === 'COVER') {
+    if (sourceAspect > targetAspect) {
+      renderH = finalH;
+      renderW = Math.max(1, Math.round(finalH * sourceAspect));
+    } else {
+      renderW = finalW;
+      renderH = Math.max(1, Math.round(finalW / sourceAspect));
+    }
+  } else {
+    if (sourceAspect > targetAspect) {
+      renderW = finalW;
+      renderH = Math.max(1, Math.round(finalW / sourceAspect));
+    } else {
+      renderH = finalH;
+      renderW = Math.max(1, Math.round(finalH * sourceAspect));
+    }
+  }
+
+  return { finalW, finalH, renderW, renderH };
+};
+
+const clampColorChannel = (value: number) => Math.max(0, Math.min(255, Math.round(value)));
+
+const rgbToHex = (r: number, g: number, b: number): string => {
+  const rr = clampColorChannel(r);
+  const gg = clampColorChannel(g);
+  const bb = clampColorChannel(b);
+  return `#${((1 << 24) + (rr << 16) + (gg << 8) + bb).toString(16).slice(1)}`;
+};
+
+const colorDistanceSq = (a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) => {
+  const dr = a.r - b.r;
+  const dg = a.g - b.g;
+  const db = a.b - b.b;
+  return dr * dr + dg * dg + db * db;
+};
+
+type ExportFramingMode = 'CONTAIN' | 'COVER';
+type RecordingDurationMode = 'INFINITE' | 'ORIGINAL' | 'LOOPS';
+type MobilePanel = 'LEFT' | 'RIGHT' | null;
+
+interface ExportDimensions {
+  finalW: number;
+  finalH: number;
+  renderW: number;
+  renderH: number;
+}
+
+const sanitizeEngineConfig = (value: unknown, fallback: EngineConfig): EngineConfig => {
+  const source = isObjectRecord(value) ? value : {};
+  return {
+    ...fallback,
+    renderEngine: toEnumSafe(source.renderEngine, RenderEngine, fallback.renderEngine),
+    seed: Math.round(toNumberSafe(source.seed, fallback.seed, 0, 999999999)),
+    resolution: Math.round(toNumberSafe(source.resolution, fallback.resolution, 1, 128)),
+    density: toNumberSafe(source.density, fallback.density, 0, 5),
+    brightness: toNumberSafe(source.brightness, fallback.brightness, 0, 3),
+    contrast: toNumberSafe(source.contrast, fallback.contrast, 0, 3),
+    hue: toNumberSafe(source.hue, fallback.hue, -180, 180),
+    saturation: toNumberSafe(source.saturation, fallback.saturation, 0, 4),
+    lightness: toNumberSafe(source.lightness, fallback.lightness, 0, 4),
+    gamma: toNumberSafe(source.gamma, fallback.gamma, 0.1, 4),
+    dithering: toNumberSafe(source.dithering, fallback.dithering, 0, 1),
+    ditheringMode: toEnumSafe(source.ditheringMode, DitheringMode, fallback.ditheringMode),
+    colorizeDither: toBooleanSafe(source.colorizeDither, fallback.colorizeDither),
+    outlineEnabled: toBooleanSafe(source.outlineEnabled, fallback.outlineEnabled),
+    outlineSensitivity: toNumberSafe(source.outlineSensitivity, fallback.outlineSensitivity, 0, 0.99),
+    outlineColor: toHexColorSafe(source.outlineColor, fallback.outlineColor),
+    mode: toEnumSafe(source.mode, AsciiMode, fallback.mode),
+    font: toEnumSafe(source.font, FontType, fallback.font),
+    semanticWord: toStringSafe(source.semanticWord, fallback.semanticWord),
+    semanticRamp: toBooleanSafe(source.semanticRamp, fallback.semanticRamp),
+    customRampEnabled: toBooleanSafe(source.customRampEnabled, fallback.customRampEnabled),
+    customSemanticMapping: toBooleanSafe(source.customSemanticMapping, fallback.customSemanticMapping),
+    customRampName: toStringSafe(source.customRampName, fallback.customRampName),
+    customRampEntries: normalizeRampEntries(source.customRampEntries ?? fallback.customRampEntries),
+    temporalEnabled: toBooleanSafe(source.temporalEnabled, fallback.temporalEnabled),
+    temporalBlend: toNumberSafe(source.temporalBlend, fallback.temporalBlend, 0, 0.95),
+    characterInertia: toNumberSafe(source.characterInertia, fallback.characterInertia, 0, 1),
+    edgeTemporalStability: toNumberSafe(source.edgeTemporalStability, fallback.edgeTemporalStability, 0, 1),
+    temporalDiagnosticsEnabled: toBooleanSafe(source.temporalDiagnosticsEnabled, fallback.temporalDiagnosticsEnabled),
+    temporalDiagnosticsMode: toEnumSafe(source.temporalDiagnosticsMode, TemporalDiagnosticsMode, fallback.temporalDiagnosticsMode),
+    temporalDiagnosticsOpacity: toNumberSafe(source.temporalDiagnosticsOpacity, fallback.temporalDiagnosticsOpacity, 0.05, 0.95),
+    adaptiveInertiaEnabled: toBooleanSafe(source.adaptiveInertiaEnabled, fallback.adaptiveInertiaEnabled),
+    adaptiveInertiaStrength: toNumberSafe(source.adaptiveInertiaStrength, fallback.adaptiveInertiaStrength, 0, 1),
+    temporalGhostClamp: toNumberSafe(source.temporalGhostClamp, fallback.temporalGhostClamp, 0, 1),
+    colorMode: toEnumSafe(source.colorMode, ColorMode, fallback.colorMode),
+    paletteName: toStringSafe(source.paletteName, fallback.paletteName),
+    palette: normalizePaletteColors(source.palette, fallback.palette),
+    distortion: toEnumSafe(source.distortion, DistortionMode, fallback.distortion),
+    distortionStrength: toNumberSafe(source.distortionStrength, fallback.distortionStrength, 0, 10),
+    postProcess: sanitizePostProcess(source.postProcess, fallback.postProcess),
+    inverted: toBooleanSafe(source.inverted, fallback.inverted),
+    frameRate: Math.round(toNumberSafe(source.frameRate, fallback.frameRate, 1, 120)),
+    transparentBackground: toBooleanSafe(source.transparentBackground, fallback.transparentBackground)
+  };
+};
+
 export default function App() {
   const [appState, setAppState] = useState<AppState>(AppState.LANDING);
-  const [config, setConfig] = useState<EngineConfig>({
+  const [configState, setConfigState] = useState<EngineConfig>({
     ...PRESETS.DEFAULT,
     mode: AsciiMode.PICO_ASCII,
     colorMode: ColorMode.MONO,
@@ -61,6 +403,16 @@ export default function App() {
     semanticRamp: false,
     postProcess: { ...DEFAULT_POST_PROCESS }
   } as EngineConfig);
+  const setConfig = useCallback<React.Dispatch<React.SetStateAction<EngineConfig>>>((nextValue) => {
+    setConfigState((prev) => {
+      const next =
+        typeof nextValue === 'function'
+          ? (nextValue as (prevState: EngineConfig) => EngineConfig)(prev)
+          : nextValue;
+      return sanitizeEngineConfig(next, prev);
+    });
+  }, []);
+  const config = configState;
   
   const [brush, setBrush] = useState<BrushType>(BrushType.NONE);
   const [theme, setTheme] = useState<ThemeMode>(ThemeMode.PICO);
@@ -73,15 +425,28 @@ export default function App() {
   const [shockTrigger, setShockTrigger] = useState<number>(0);
   const [clearBrushTrigger, setClearBrushTrigger] = useState<number>(0);
   const [dpi, setDpi] = useState<PrintDPI>(PrintDPI.SCREEN);
+  const [exportFramingMode, setExportFramingMode] = useState<ExportFramingMode>('CONTAIN');
   const [isExporting, setIsExporting] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordTime, setRecordTime] = useState(0);
+  const [recordingDurationMode, setRecordingDurationMode] = useState<RecordingDurationMode>('INFINITE');
+  const [recordingLoops, setRecordingLoops] = useState(1);
+  const [gifFps, setGifFps] = useState(8);
+  const [gifQuality, setGifQuality] = useState(20);
+  const [gifSourceLoops, setGifSourceLoops] = useState(1);
+  const [gifRepeatCount, setGifRepeatCount] = useState(0);
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  const [exportStatusLabel, setExportStatusLabel] = useState('GENERATING MASTER...');
+  const [exportProgress, setExportProgress] = useState<number | null>(null);
+  const rendererFallbackWarnedRef = useRef(false);
+  const schemaWarningShownRef = useRef(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasHandleRef = useRef<AsciiCanvasHandle>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const recordIntervalRef = useRef<number | null>(null);
+  const recordStopTimeoutRef = useRef<number | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -99,9 +464,7 @@ export default function App() {
       if (savedPalettes) {
           try {
               const data = JSON.parse(savedPalettes);
-              if (data && typeof data === 'object' && !Array.isArray(data)) {
-                setCustomPalettes(data);
-              }
+              setCustomPalettes(normalizePaletteStore(data));
           } catch (e) {
               console.error("Failed to load palettes:", e);
           }
@@ -125,12 +488,56 @@ export default function App() {
       }
   };
 
+  const warnIfFutureSchema = (schemaVersion: number, kind: 'project' | 'preset') => {
+    if (schemaVersion <= SERIALIZATION_SCHEMA_VERSION) return;
+    if (schemaWarningShownRef.current) return;
+    schemaWarningShownRef.current = true;
+    alert(
+      `${kind.toUpperCase()} SCHEMA v${schemaVersion} IS NEWER THAN THIS APP (v${SERIALIZATION_SCHEMA_VERSION}). LOADING IN BEST-EFFORT COMPATIBILITY MODE.`
+    );
+  };
+
+  const clearRecordingTimers = () => {
+    if (recordIntervalRef.current) {
+      clearInterval(recordIntervalRef.current);
+      recordIntervalRef.current = null;
+    }
+    if (recordStopTimeoutRef.current) {
+      clearTimeout(recordStopTimeoutRef.current);
+      recordStopTimeoutRef.current = null;
+    }
+  };
+
+  const stopRecordingSession = () => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop();
+    } else {
+      setIsRecording(false);
+      setRecordTime(0);
+      clearRecordingTimers();
+    }
+  };
+
+  const getRecordableVideoDuration = (): number | null => {
+    const sourceVideo = imageSource instanceof HTMLVideoElement ? imageSource : null;
+    if (!sourceVideo) return null;
+    if (sourceVideo.srcObject) return null;
+    const duration = sourceVideo.duration;
+    if (!Number.isFinite(duration) || duration <= 0) return null;
+    return duration;
+  };
+
+  useEffect(() => {
+    if (recordingDurationMode === 'INFINITE') return;
+    if (!getRecordableVideoDuration()) {
+      setRecordingDurationMode('INFINITE');
+    }
+  }, [recordingDurationMode, imageSource]);
+
   const handleRecordVideo = () => {
     if (isRecording) {
-      mediaRecorderRef.current?.stop();
-      setIsRecording(false);
-      if (recordIntervalRef.current) clearInterval(recordIntervalRef.current);
-      setRecordTime(0);
+      stopRecordingSession();
       return;
     }
 
@@ -143,6 +550,14 @@ export default function App() {
     chunksRef.current = [];
     const stream = (canvas as any).captureStream(30);
     const options = { mimeType: 'video/webm;codecs=vp9', bitsPerSecond: 8000000 };
+    const sourceDuration = getRecordableVideoDuration();
+    const targetDuration =
+      recordingDurationMode === 'ORIGINAL'
+        ? sourceDuration
+        : recordingDurationMode === 'LOOPS'
+          ? (sourceDuration ? sourceDuration * Math.max(1, recordingLoops) : null)
+          : null;
+    const sourceVideo = imageSource instanceof HTMLVideoElement ? imageSource : null;
     
     try {
       const recorder = new MediaRecorder(stream, options);
@@ -150,6 +565,9 @@ export default function App() {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.onstop = () => {
+        clearRecordingTimers();
+        setIsRecording(false);
+        setRecordTime(0);
         const blob = new Blob(chunksRef.current, { type: 'video/webm' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
@@ -157,7 +575,21 @@ export default function App() {
         link.download = `astrit-render-${config.mode}-${Date.now()}.webm`;
         link.click();
         URL.revokeObjectURL(url);
+        mediaRecorderRef.current = null;
       };
+
+      if (sourceVideo) {
+        if (recordingDurationMode !== 'INFINITE' && sourceDuration) {
+          try {
+            sourceVideo.currentTime = 0;
+          } catch (err) {
+            console.warn('Could not seek source video to start before recording:', err);
+          }
+        }
+        if (sourceVideo.paused) {
+          void sourceVideo.play().catch((err) => console.warn('Source video play failed before recording:', err));
+        }
+      }
 
       recorder.start();
       mediaRecorderRef.current = recorder;
@@ -168,17 +600,25 @@ export default function App() {
         setRecordTime(Math.floor((Date.now() - start) / 1000));
       }, 1000);
 
+      if (targetDuration && targetDuration > 0) {
+        recordStopTimeoutRef.current = window.setTimeout(() => {
+          stopRecordingSession();
+        }, Math.round(targetDuration * 1000));
+      }
+
     } catch (e) {
       console.error("Recording failed:", e);
       alert("Recording failed. Your browser might not support high-quality WebM capture.");
+      clearRecordingTimers();
     }
   };
 
   const handleSavePalette = (name: string, colors: string[]) => {
-      const updated = { ...customPalettes, [name]: colors };
+      const normalizedColors = normalizePaletteColors(colors, config.palette);
+      const updated = { ...customPalettes, [name]: normalizedColors };
       setCustomPalettes(updated);
       localStorage.setItem('astrit_custom_palettes', JSON.stringify(updated));
-      setConfig(p => ({ ...p, paletteName: name, palette: colors }));
+      setConfig(p => ({ ...p, paletteName: name, palette: normalizedColors }));
   };
 
   const handleDeletePalette = (name: string) => {
@@ -252,33 +692,90 @@ export default function App() {
           alert("PLEASE PROVIDE A SOURCE INPUT TO SAMPLE DATA.");
           return;
       }
+
+      if (imageSource instanceof HTMLVideoElement) {
+          if (!imageSource.videoWidth || !imageSource.videoHeight || imageSource.readyState < 2) {
+            alert("VIDEO FRAME NOT READY YET. PLAY OR SEEK THE VIDEO, THEN SAMPLE AGAIN.");
+            return;
+          }
+      }
+
+      const sourceDimensions = getSourceDimensions(imageSource);
+      if (!sourceDimensions) {
+          alert("SOURCE DIMENSIONS ARE NOT READY YET.");
+          return;
+      }
+
+      const SAMPLE_SIZE = 192;
+      const STEP = 2;
+      const QUANT_STEP = 24;
+      const MIN_COLOR_DISTANCE_SQ = 34 * 34;
+
       const canvas = document.createElement('canvas');
-      canvas.width = 150;
-      canvas.height = 150;
+      canvas.width = SAMPLE_SIZE;
+      canvas.height = SAMPLE_SIZE;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
-      ctx.drawImage(imageSource, 0, 0, 150, 150);
-      const imageData = ctx.getImageData(0, 0, 150, 150).data;
-      const colorsMap: Record<string, number> = {};
-      
-      // Step through pixels to find the most common dominant colors
-      for (let i = 0; i < imageData.length; i += 16) { 
-          const r = imageData[i], g = imageData[i+1], b = imageData[i+2];
-          // Round colors slightly to group similar shades
-          const rr = Math.round(r / 10) * 10;
-          const rg = Math.round(g / 10) * 10;
-          const rb = Math.round(b / 10) * 10;
-          const hex = `#${((1 << 24) + (rr << 16) + (rg << 8) + rb).toString(16).slice(1)}`;
-          colorsMap[hex] = (colorsMap[hex] || 0) + 1;
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(imageSource, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+      const imageData = ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data;
+      const colorsMap = new Map<string, { r: number; g: number; b: number; weight: number }>();
+
+      for (let y = 0; y < SAMPLE_SIZE; y += STEP) {
+        for (let x = 0; x < SAMPLE_SIZE; x += STEP) {
+          const idx = (y * SAMPLE_SIZE + x) * 4;
+          const alpha = imageData[idx + 3];
+          if (alpha < 32) continue;
+
+          const r = imageData[idx];
+          const g = imageData[idx + 1];
+          const b = imageData[idx + 2];
+
+          const rq = clampColorChannel(Math.round(r / QUANT_STEP) * QUANT_STEP);
+          const gq = clampColorChannel(Math.round(g / QUANT_STEP) * QUANT_STEP);
+          const bq = clampColorChannel(Math.round(b / QUANT_STEP) * QUANT_STEP);
+
+          const maxChannel = Math.max(rq, gq, bq);
+          const minChannel = Math.min(rq, gq, bq);
+          const saturation = maxChannel === 0 ? 0 : (maxChannel - minChannel) / maxChannel;
+          const luminance = (rq * 0.299 + gq * 0.587 + bq * 0.114) / 255;
+          const weight = 1 + saturation * 1.1 + Math.abs(luminance - 0.5) * 0.25;
+
+          const key = `${rq},${gq},${bq}`;
+          const existing = colorsMap.get(key);
+          if (existing) {
+            existing.weight += weight;
+          } else {
+            colorsMap.set(key, { r: rq, g: gq, b: bq, weight });
+          }
+        }
       }
-      
-      const palette = Object.entries(colorsMap)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 8) // Sample 8 dominant colors for a richer look
-        .map(entry => entry[0]);
+
+      const rankedColors = Array.from(colorsMap.values()).sort((a, b) => b.weight - a.weight);
+      const selected: Array<{ r: number; g: number; b: number }> = [];
+
+      for (const color of rankedColors) {
+        if (selected.length >= 8) break;
+        const isDistinct = selected.every((entry) => colorDistanceSq(color, entry) >= MIN_COLOR_DISTANCE_SQ);
+        if (isDistinct) selected.push({ r: color.r, g: color.g, b: color.b });
+      }
+
+      if (selected.length < 8) {
+        for (const color of rankedColors) {
+          if (selected.length >= 8) break;
+          const exists = selected.some((entry) => entry.r === color.r && entry.g === color.g && entry.b === color.b);
+          if (!exists) selected.push({ r: color.r, g: color.g, b: color.b });
+        }
+      }
+
+      const palette = selected.map((entry) => rgbToHex(entry.r, entry.g, entry.b));
 
       if (palette.length > 1) {
           setConfig(p => ({ ...p, paletteName: 'SAMPLED', palette, colorMode: ColorMode.QUANTIZED }));
+      } else {
+          alert("PALETTE SAMPLING FOUND TOO FEW DISTINCT COLORS.");
       }
   }, [imageSource]);
 
@@ -290,6 +787,7 @@ export default function App() {
   }, []);
 
   const stopMedia = () => {
+      stopRecordingSession();
       if (videoRef.current) {
           videoRef.current.pause();
           if (videoRef.current.srcObject) {
@@ -303,13 +801,25 @@ export default function App() {
   };
 
   useEffect(() => {
+      const handleResize = () => {
+          if (window.innerWidth >= 1024) {
+              setMobilePanel(null);
+          }
+      };
+      window.addEventListener('resize', handleResize);
       return () => {
-          if (recordIntervalRef.current) clearInterval(recordIntervalRef.current);
+          window.removeEventListener('resize', handleResize);
+      };
+  }, []);
+
+  useEffect(() => {
+      return () => {
+          clearRecordingTimers();
           stopMedia();
       };
   }, []);
 
-  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       stopMedia();
@@ -320,9 +830,18 @@ export default function App() {
          vid.src = url;
          vid.loop = true;
          vid.muted = true;
-         vid.play();
+         vid.playsInline = true;
+         vid.preload = 'metadata';
+         const metadataPromise = waitForVideoMetadata(vid, 8000);
+         void vid.play().catch((err) => {
+           console.warn('Video autoplay failed after upload:', err);
+         });
          videoRef.current = vid;
          setImageSource(vid);
+         const metadataReady = await metadataPromise;
+         if (!metadataReady) {
+           alert("VIDEO METADATA NOT READY. PLEASE WAIT A MOMENT, THEN TRY EXPORT AGAIN.");
+         }
       } else {
          const img = new Image();
          img.src = url;
@@ -337,7 +856,11 @@ export default function App() {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
         const vid = document.createElement('video');
         vid.srcObject = stream;
-        vid.play();
+        vid.playsInline = true;
+        void vid.play().catch((err) => {
+          console.warn('Webcam autoplay failed:', err);
+        });
+        await waitForVideoMetadata(vid, 4000);
         videoRef.current = vid;
         setImageSource(vid);
     } catch (err) {
@@ -365,37 +888,56 @@ export default function App() {
 
   const handleExportHD = async (selectedSize: string = "SOURCE") => {
     if (!imageSource || !canvasHandleRef.current) return;
+    setExportStatusLabel('GENERATING MASTER...');
+    setExportProgress(null);
     setIsExporting(true);
 
     setTimeout(async () => {
         try {
-            let srcW = 1920, srcH = 1080;
-            if (imageSource instanceof HTMLImageElement) { srcW = imageSource.naturalWidth; srcH = imageSource.naturalHeight; }
-            else if (imageSource instanceof HTMLVideoElement) { srcW = videoRef.current?.videoWidth || 1920; srcH = videoRef.current?.videoHeight || 1080; }
-
-            const isPortrait = srcH > srcW;
-            let targetW = srcW, targetH = srcH;
-
-            if (selectedSize !== "SOURCE" && PAPER_DIMENSIONS[selectedSize]) {
-                const dim = PAPER_DIMENSIONS[selectedSize];
-                if (isPortrait) {
-                    targetW = Math.min(dim.w, dim.h);
-                    targetH = Math.max(dim.w, dim.h);
-                } else {
-                    targetW = Math.max(dim.w, dim.h);
-                    targetH = Math.min(dim.w, dim.h);
-                }
+            const sourceDimensions = await resolveSourceDimensions(imageSource, 8000);
+            if (!sourceDimensions) {
+              alert("SOURCE DIMENSIONS ARE NOT READY. WAIT FOR VIDEO METADATA, THEN EXPORT AGAIN.");
+              return;
             }
+            const srcW = sourceDimensions.w;
+            const srcH = sourceDimensions.h;
+            const { finalW, finalH, renderW, renderH } = computeExportDimensions(
+              srcW,
+              srcH,
+              selectedSize,
+              dpi,
+              exportFramingMode
+            );
 
-            const scaleMultiplier = dpi === PrintDPI.SCREEN ? DPI_MULTIPLIERS.SCREEN : DPI_MULTIPLIERS.PRINT;
-            const finalW = Math.round(targetW * scaleMultiplier);
-            const finalH = Math.round(targetH * scaleMultiplier);
-
-            const blob = await canvasHandleRef.current!.triggerStaticRender(finalW, finalH);
+            const blob = await canvasHandleRef.current!.triggerStaticRender(renderW, renderH);
             if (blob) {
-                const url = URL.createObjectURL(blob);
+                let outputBlob: Blob = blob;
+
+                if (selectedSize !== "SOURCE" && (renderW !== finalW || renderH !== finalH)) {
+                  const outputCanvas = document.createElement('canvas');
+                  outputCanvas.width = finalW;
+                  outputCanvas.height = finalH;
+                  const outCtx = outputCanvas.getContext('2d');
+                  if (outCtx) {
+                    if (config.transparentBackground) {
+                      outCtx.clearRect(0, 0, finalW, finalH);
+                    } else {
+                      outCtx.fillStyle = config.palette[0] || '#000000';
+                      outCtx.fillRect(0, 0, finalW, finalH);
+                    }
+
+                    const renderImg = await blobToImage(blob);
+                    const drawX = Math.floor((finalW - renderW) * 0.5);
+                    const drawY = Math.floor((finalH - renderH) * 0.5);
+                    outCtx.drawImage(renderImg, drawX, drawY, renderW, renderH);
+                    const composedBlob = await new Promise<Blob | null>((resolve) => outputCanvas.toBlob(resolve, 'image/png', 1.0));
+                    if (composedBlob) outputBlob = composedBlob;
+                  }
+                }
+
+                const url = URL.createObjectURL(outputBlob);
                 const link = document.createElement('a');
-                link.download = `astrit-MASTER-${selectedSize}-${dpi}-${Date.now()}.png`;
+                link.download = `astrit-MASTER-${selectedSize}-${dpi}-${selectedSize === 'SOURCE' ? 'SOURCE' : exportFramingMode}-${Date.now()}.png`;
                 link.href = url;
                 link.click();
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -409,8 +951,236 @@ export default function App() {
     }, 100);
   };
 
+  const handleExportGIF = async (selectedSize: string = "SOURCE") => {
+    if (!imageSource || !canvasHandleRef.current) return;
+    setExportStatusLabel('PREPARING GIF...');
+    setExportProgress(0);
+    setIsExporting(true);
+
+    setTimeout(async () => {
+      try {
+        const sourceDimensions = await resolveSourceDimensions(imageSource, 8000);
+        if (!sourceDimensions) {
+          alert("SOURCE DIMENSIONS ARE NOT READY. WAIT FOR VIDEO METADATA, THEN EXPORT AGAIN.");
+          return;
+        }
+        const srcW = sourceDimensions.w;
+        const srcH = sourceDimensions.h;
+        let { finalW, finalH, renderW, renderH } = computeExportDimensions(
+          srcW,
+          srcH,
+          selectedSize,
+          PrintDPI.SCREEN,
+          exportFramingMode
+        );
+
+        if (config.renderEngine === RenderEngine.TEXTMODE) {
+          const liveCanvas = canvasHandleRef.current?.getCanvas();
+          if (!liveCanvas) throw new Error('Textmode canvas not ready for GIF export.');
+
+          const MAX_GIF_SIDE = 640;
+          const MAX_GIF_PIXELS = 640 * 640;
+          let gifScale = Math.min(1, MAX_GIF_SIDE / Math.max(finalW, finalH));
+          const pixelScale = Math.sqrt(MAX_GIF_PIXELS / Math.max(1, finalW * finalH));
+          if (pixelScale < gifScale) gifScale = pixelScale;
+          if (gifScale < 1) {
+            finalW = Math.max(1, Math.round(finalW * gifScale));
+            finalH = Math.max(1, Math.round(finalH * gifScale));
+            renderW = Math.max(1, Math.round(renderW * gifScale));
+            renderH = Math.max(1, Math.round(renderH * gifScale));
+          }
+
+          const frameCanvas = document.createElement('canvas');
+          frameCanvas.width = finalW;
+          frameCanvas.height = finalH;
+          const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true });
+          if (!frameCtx) throw new Error('Could not create textmode GIF frame canvas.');
+
+          if (config.transparentBackground) {
+            frameCtx.clearRect(0, 0, finalW, finalH);
+          } else {
+            frameCtx.fillStyle = config.palette[0] || '#000000';
+            frameCtx.fillRect(0, 0, finalW, finalH);
+          }
+          const drawX = Math.floor((finalW - renderW) * 0.5);
+          const drawY = Math.floor((finalH - renderH) * 0.5);
+          frameCtx.drawImage(liveCanvas, drawX, drawY, renderW, renderH);
+
+          const fps = Math.max(1, Math.min(30, Math.round(gifFps)));
+          const quality = Math.max(1, Math.min(30, Math.round(gifQuality)));
+          const repeatSetting = gifRepeatCount <= 0 ? 0 : Math.max(0, Math.round(gifRepeatCount) - 1);
+          const gif = new GIF({
+            workers: 2,
+            quality,
+            workerScript: gifWorkerUrl,
+            width: finalW,
+            height: finalH,
+            repeat: repeatSetting
+          });
+          gif.addFrame(frameCtx as unknown as CanvasRenderingContext2D, { copy: true, delay: Math.max(20, Math.round(1000 / fps)) });
+          setExportStatusLabel('ENCODING GIF...');
+          setExportProgress(0.5);
+
+          const gifBlob = await new Promise<Blob>((resolve, reject) => {
+            gif.on('progress', (progress: number) => setExportProgress(progress));
+            gif.on('finished', (blob: Blob) => resolve(blob));
+            try {
+              gif.render();
+            } catch (error) {
+              reject(error instanceof Error ? error : new Error('Textmode GIF render failed.'));
+            }
+          });
+
+          const url = URL.createObjectURL(gifBlob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = `astrit-GIF-textmode-${selectedSize}-${fps}fps-${Date.now()}.gif`;
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          return;
+        }
+
+        const MAX_GIF_SIDE = 640;
+        const MAX_GIF_PIXELS = 640 * 640;
+        let gifScale = Math.min(1, MAX_GIF_SIDE / Math.max(finalW, finalH));
+        const pixelScale = Math.sqrt(MAX_GIF_PIXELS / Math.max(1, finalW * finalH));
+        if (pixelScale < gifScale) gifScale = pixelScale;
+        if (gifScale < 1) {
+          finalW = Math.max(1, Math.round(finalW * gifScale));
+          finalH = Math.max(1, Math.round(finalH * gifScale));
+          renderW = Math.max(1, Math.round(renderW * gifScale));
+          renderH = Math.max(1, Math.round(renderH * gifScale));
+        }
+
+        const frameCanvas = document.createElement('canvas');
+        frameCanvas.width = finalW;
+        frameCanvas.height = finalH;
+        const frameCtx = frameCanvas.getContext('2d', { willReadFrequently: true });
+        if (!frameCtx) throw new Error('Could not create GIF frame canvas.');
+        const renderCanvas = document.createElement('canvas');
+        const gifEngine = new AsciiEngine(renderCanvas);
+
+        const addRenderedFrame = (frameIndex: number) => {
+          gifEngine.render(imageSource, config, renderW, renderH, frameIndex, undefined, undefined, false);
+
+          if (config.transparentBackground) {
+            frameCtx.clearRect(0, 0, finalW, finalH);
+          } else {
+            frameCtx.fillStyle = config.palette[0] || '#000000';
+            frameCtx.fillRect(0, 0, finalW, finalH);
+          }
+
+          const drawX = Math.floor((finalW - renderW) * 0.5);
+          const drawY = Math.floor((finalH - renderH) * 0.5);
+          frameCtx.drawImage(renderCanvas, drawX, drawY, renderW, renderH);
+        };
+
+        const fps = Math.max(1, Math.min(30, Math.round(gifFps)));
+        const quality = Math.max(1, Math.min(30, Math.round(gifQuality)));
+        const delayMs = Math.max(20, Math.round(1000 / fps));
+        const repeatSetting = gifRepeatCount <= 0 ? 0 : Math.max(0, Math.round(gifRepeatCount) - 1);
+
+        const gif = new GIF({
+          workers: 2,
+          quality,
+          workerScript: gifWorkerUrl,
+          width: finalW,
+          height: finalH,
+          repeat: repeatSetting
+        });
+
+        const sourceVideo = imageSource instanceof HTMLVideoElement ? imageSource : null;
+        const sourceVideoDuration =
+          sourceVideo && !sourceVideo.srcObject && Number.isFinite(sourceVideo.duration) && sourceVideo.duration > 0
+            ? sourceVideo.duration
+            : null;
+
+        if (sourceVideo && sourceVideoDuration) {
+          const wasPaused = sourceVideo.paused;
+          const originalTime = sourceVideo.currentTime;
+          sourceVideo.pause();
+
+          const captureLoops = Math.max(1, Math.round(gifSourceLoops));
+          const totalDuration = sourceVideoDuration * captureLoops;
+          const MAX_GIF_FRAMES = 120;
+          let frameCount = Math.max(1, Math.round(totalDuration * fps));
+          if (frameCount > MAX_GIF_FRAMES) {
+            frameCount = MAX_GIF_FRAMES;
+            alert(`GIF frame count capped to ${MAX_GIF_FRAMES} for performance. Reduce loops/FPS for longer exports.`);
+          }
+          setExportStatusLabel('CAPTURING GIF FRAMES...');
+
+          for (let i = 0; i < frameCount; i++) {
+            const timelinePos = (i / frameCount) * totalDuration;
+            const sourceTime = Math.min(
+              Math.max(0, timelinePos % sourceVideoDuration),
+              Math.max(0, sourceVideoDuration - 0.001)
+            );
+            await seekVideoTo(sourceVideo, sourceTime);
+            addRenderedFrame(i);
+            gif.addFrame(frameCtx as unknown as CanvasRenderingContext2D, { copy: true, delay: delayMs });
+            setExportProgress((i + 1) / Math.max(1, frameCount));
+          }
+
+          await seekVideoTo(sourceVideo, originalTime);
+          if (!wasPaused) {
+            void sourceVideo.play().catch((err) => console.warn('Video resume failed after GIF export:', err));
+          }
+        } else {
+          addRenderedFrame(0);
+          gif.addFrame(frameCtx as unknown as CanvasRenderingContext2D, { copy: true, delay: delayMs });
+          setExportProgress(0.35);
+        }
+
+        const gifBlob = await new Promise<Blob>((resolve, reject) => {
+          let settled = false;
+          const timeoutId = window.setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error('GIF encoding timed out.'));
+          }, 120000);
+
+          gif.on('progress', (progress: number) => {
+            setExportStatusLabel('ENCODING GIF...');
+            setExportProgress(progress);
+          });
+          gif.on('finished', (blob: Blob) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            resolve(blob);
+          });
+          try {
+            gif.render();
+          } catch (error) {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            reject(error instanceof Error ? error : new Error('GIF render failed.'));
+          }
+        });
+
+        const url = URL.createObjectURL(gifBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `astrit-GIF-${selectedSize}-${fps}fps-${Date.now()}.gif`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        console.error("GIF export failed:", e);
+        alert("GIF export failed. Try lower loops/FPS or a smaller export size.");
+      } finally {
+        setIsExporting(false);
+        setExportStatusLabel('GENERATING MASTER...');
+        setExportProgress(null);
+      }
+    }, 100);
+  };
+
   const handleContactSheet = async () => {
     if (!canvasHandleRef.current || !imageSource) return;
+    setExportStatusLabel('GENERATING CONTACT SHEET...');
+    setExportProgress(null);
     setIsExporting(true);
 
     setTimeout(async () => {
@@ -502,6 +1272,7 @@ export default function App() {
       
       const project: ProjectFile = {
           version: ENGINE_VERSION,
+          schemaVersion: SERIALIZATION_SCHEMA_VERSION,
           config,
           theme,
           sourceImage: sourceB64,
@@ -524,16 +1295,13 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = (ev) => {
           try {
-              const project: ProjectFile = JSON.parse(ev.target?.result as string);
+              const project = JSON.parse(ev.target?.result as string) as Partial<ProjectFile> & Record<string, unknown>;
+              const schemaVersion = toSchemaVersionSafe(project.schemaVersion, 0);
+              warnIfFutureSchema(schemaVersion, 'project');
               if (project.config) {
-                  setConfig(prev => ({
-                    ...prev,
-                    ...project.config,
-                    customRampEntries: normalizeRampEntries(project.config.customRampEntries ?? prev.customRampEntries),
-                    customRampName: project.config.customRampName || prev.customRampName
-                  }));
+                  setConfig(prev => sanitizeEngineConfig({ ...prev, ...project.config }, prev));
               }
-              if (project.theme) setTheme(project.theme);
+              if (project.theme && isThemeMode(project.theme)) setTheme(project.theme);
               if (project.sourceImage) {
                   const img = new Image();
                   img.onload = () => setImageSource(img);
@@ -551,6 +1319,7 @@ export default function App() {
       const preset: PresetFile & { theme?: ThemeMode } = {
           name: presetName,
           version: ENGINE_VERSION,
+          schemaVersion: SERIALIZATION_SCHEMA_VERSION,
           config,
           theme 
       };
@@ -569,16 +1338,13 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = (ev) => {
           try {
-              const preset: any = JSON.parse(ev.target?.result as string);
+              const preset = JSON.parse(ev.target?.result as string) as Partial<PresetFile> & { theme?: unknown } & Record<string, unknown>;
+              const schemaVersion = toSchemaVersionSafe(preset.schemaVersion, 0);
+              warnIfFutureSchema(schemaVersion, 'preset');
               if (preset.config) {
-                  setConfig(prev => ({
-                    ...prev,
-                    ...preset.config,
-                    customRampEntries: normalizeRampEntries(preset.config.customRampEntries ?? prev.customRampEntries),
-                    customRampName: preset.config.customRampName || prev.customRampName
-                  }));
+                  setConfig(prev => sanitizeEngineConfig({ ...prev, ...preset.config }, prev));
               }
-              if (preset.theme) setTheme(preset.theme);
+              if (preset.theme && isThemeMode(preset.theme)) setTheme(preset.theme);
           } catch(err) {
               alert("Error loading preset JSON.");
           }
@@ -589,23 +1355,124 @@ export default function App() {
   const handleExportSVG = async () => { alert("SVG Export coming soon."); };
   const handleSocialCard = async () => { alert("Social Card currently unavailable."); };
   const handleShock = () => setShockTrigger(Date.now());
+  const handleRendererUnavailable = useCallback((engine: RenderEngine, reason: string) => {
+    setConfig((prev) => {
+      if (engine === RenderEngine.TEXTMODE && prev.renderEngine === RenderEngine.TEXTMODE) {
+        return { ...prev, renderEngine: RenderEngine.NATIVE };
+      }
+      return prev;
+    });
+    if (!rendererFallbackWarnedRef.current) {
+      rendererFallbackWarnedRef.current = true;
+      alert(`TEXTMODE DISABLED: ${reason} USING NATIVE RENDERER INSTEAD.`);
+    }
+  }, [setConfig]);
+  const sourceVideoDuration = getRecordableVideoDuration();
+  const canUseTimedRecording = sourceVideoDuration !== null;
 
   if (appState === AppState.LANDING) {
       return <LandingPage onStart={() => setAppState(AppState.STUDIO)} />;
   }
 
   return (
-    <div className="flex h-screen w-screen bg-[var(--bg-app)] text-[var(--text-primary)] font-mono overflow-hidden transition-colors duration-500">
+    <div className="relative flex h-screen w-screen bg-[var(--bg-app)] text-[var(--text-primary)] font-mono overflow-hidden transition-colors duration-500">
+        <div className="lg:hidden absolute top-3 left-3 right-3 z-40 flex items-center justify-between gap-2">
+            <button
+              onClick={() => setMobilePanel((prev) => (prev === 'LEFT' ? null : 'LEFT'))}
+              className="flex-1 h-10 px-3 bg-[var(--bg-panel)] border-2 border-[var(--border-panel)] text-[10px] uppercase flex items-center justify-center gap-2"
+            >
+              <ImageIcon size={14} />
+              Source
+            </button>
+            <button
+              onClick={() => setMobilePanel((prev) => (prev === 'RIGHT' ? null : 'RIGHT'))}
+              className="flex-1 h-10 px-3 bg-[var(--bg-panel)] border-2 border-[var(--border-panel)] text-[10px] uppercase flex items-center justify-center gap-2"
+            >
+              <SlidersHorizontal size={14} />
+              Controls
+            </button>
+            {mobilePanel && (
+              <button
+                onClick={() => setMobilePanel(null)}
+                className="h-10 w-10 bg-[var(--bg-module)] border-2 border-[var(--border-module)] flex items-center justify-center"
+                aria-label="Close panel"
+              >
+                <X size={14} />
+              </button>
+            )}
+        </div>
+
+        {mobilePanel && (
+          <button
+            onClick={() => setMobilePanel(null)}
+            className="lg:hidden fixed inset-0 bg-black/70 z-40"
+            aria-label="Close mobile panel backdrop"
+          />
+        )}
+
+        <div className={`lg:hidden fixed inset-y-0 left-0 z-50 w-[min(22rem,100vw)] transform transition-transform duration-200 ${mobilePanel === 'LEFT' ? 'translate-x-0' : '-translate-x-full'}`}>
+            <LeftPanel 
+                config={config} setConfig={setConfig} onUpload={handleUpload} onWebcam={handleWebcam}
+                charStats={charStats}
+                customPalettes={customPalettes} onSavePalette={handleSavePalette}
+                onDeletePalette={handleDeletePalette} onGenerateFromImage={handleGenerateFromImage}
+                customRamps={customRamps} onSaveRamp={handleSaveRamp}
+                onLoadRamp={handleLoadRamp} onDeleteRamp={handleDeleteRamp}
+                onSaveProject={handleSaveProject} onLoadProject={handleLoadProject}
+                onSavePreset={handleSavePreset} onLoadPreset={handleLoadPreset}
+                onEyeDropper={handleEyeDropper}
+            />
+        </div>
+
+        <div className={`lg:hidden fixed inset-y-0 right-0 z-50 w-[min(22rem,100vw)] transform transition-transform duration-200 ${mobilePanel === 'RIGHT' ? 'translate-x-0' : 'translate-x-full'}`}>
+            <RightPanel 
+                config={config} setConfig={setConfig} brush={brush} setBrush={setBrush}
+                onExport={handleExport} onExportHD={handleExportHD}
+                onExportGIF={handleExportGIF}
+                onSocialCard={handleSocialCard} onContactSheet={handleContactSheet}
+                onExportSVG={handleExportSVG} onShock={handleShock}
+                onClearBrush={() => setClearBrushTrigger(Date.now())}
+                onRecordVideo={handleRecordVideo} isRecording={isRecording}
+                dpi={dpi} setDpi={setDpi} isExporting={isExporting}
+                exportFramingMode={exportFramingMode}
+                setExportFramingMode={setExportFramingMode}
+                recordingDurationMode={recordingDurationMode}
+                setRecordingDurationMode={setRecordingDurationMode}
+                recordingLoops={recordingLoops}
+                setRecordingLoops={setRecordingLoops}
+                canUseTimedRecording={canUseTimedRecording}
+                sourceVideoDuration={sourceVideoDuration}
+                gifFps={gifFps}
+                setGifFps={setGifFps}
+                gifQuality={gifQuality}
+                setGifQuality={setGifQuality}
+                gifSourceLoops={gifSourceLoops}
+                setGifSourceLoops={setGifSourceLoops}
+                gifRepeatCount={gifRepeatCount}
+                setGifRepeatCount={setGifRepeatCount}
+            />
+        </div>
+
         {isExporting && (
             <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex flex-col items-center justify-center animate-fadeIn">
                 <div className="w-64 h-2 bg-[var(--bg-panel)] mb-4 overflow-hidden relative">
-                    <div className="absolute inset-0 bg-[var(--accent)] animate-[shimmer_2s_infinite]"></div>
+                    <div
+                      className="absolute inset-y-0 left-0 bg-[var(--accent)] transition-[width] duration-150"
+                      style={{ width: exportProgress !== null ? `${Math.round(exportProgress * 100)}%` : '100%' }}
+                    ></div>
+                    {exportProgress === null && (
+                      <div className="absolute inset-0 bg-[var(--accent)] animate-[shimmer_2s_infinite]"></div>
+                    )}
                 </div>
-                <h3 className="text-[var(--accent)] font-['Rubik_Glitch'] text-3xl mb-2">GENERATING MASTER...</h3>
+                <h3 className="text-[var(--accent)] font-['Rubik_Glitch'] text-3xl mb-2">{exportStatusLabel}</h3>
+                {exportProgress !== null && (
+                  <p className="text-[var(--text-secondary)] text-sm mb-1">{Math.round(exportProgress * 100)}%</p>
+                )}
                 <p className="text-[var(--text-secondary)] text-xs tracking-widest animate-pulse">DO NOT CLOSE TAB</p>
             </div>
         )}
         
+        <div className="hidden lg:block">
         <LeftPanel 
             config={config} setConfig={setConfig} onUpload={handleUpload} onWebcam={handleWebcam}
             charStats={charStats}
@@ -617,13 +1484,14 @@ export default function App() {
             onSavePreset={handleSavePreset} onLoadPreset={handleLoadPreset}
             onEyeDropper={handleEyeDropper}
         />
+        </div>
 
-        <main className="flex-1 relative bg-[#000] flex items-center justify-center p-6 border-t-8 border-b-8 border-[var(--border-panel)]">
-            <div className="relative w-full h-full max-h-[90vh] aspect-video border-4 border-[var(--border-module)] bg-black rounded-lg overflow-hidden ring-4 ring-[var(--highlight)]/20 shadow-2xl">
+        <main className="flex-1 relative bg-[#000] flex items-center justify-center p-3 pt-16 lg:p-6 lg:pt-6 border-t-8 border-b-8 border-[var(--border-panel)] min-w-0">
+            <div className="relative w-full h-full max-h-[90vh] border-2 sm:border-4 border-[var(--border-module)] bg-black rounded-lg overflow-hidden ring-2 sm:ring-4 ring-[var(--highlight)]/20 shadow-2xl">
                 {!imageSource && brush === BrushType.NONE && (
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
                         <div className="text-center animate-pulse">
-                            <h2 className="text-6xl text-[var(--border-module)] font-['Rubik_Glitch']">NO SIGNAL</h2>
+                            <h2 className="text-3xl sm:text-6xl text-[var(--border-module)] font-['Rubik_Glitch']">NO SIGNAL</h2>
                             <p className="text-[var(--text-secondary)] mt-4 font-bold tracking-[0.5em]">SYSTEM STANDBY</p>
                         </div>
                     </div>
@@ -640,24 +1508,46 @@ export default function App() {
                     ref={canvasHandleRef} config={config} imageSource={imageSource} 
                     brushType={brush} onStatsUpdate={handleStatsUpdate}
                     shockTrigger={shockTrigger} clearBrushTrigger={clearBrushTrigger}
+                    onRendererUnavailable={handleRendererUnavailable}
                 />
                 <div className="absolute inset-0 scanline pointer-events-none opacity-30"></div>
                 <div className="absolute inset-0 vignette pointer-events-none"></div>
                 <div className="absolute inset-0 crt-flicker pointer-events-none opacity-5"></div>
             </div>
 
-            <Mascot />
+            <div className="hidden sm:block">
+              <Mascot />
+            </div>
         </main>
 
+        <div className="hidden lg:block">
         <RightPanel 
             config={config} setConfig={setConfig} brush={brush} setBrush={setBrush}
             onExport={handleExport} onExportHD={handleExportHD}
+            onExportGIF={handleExportGIF}
             onSocialCard={handleSocialCard} onContactSheet={handleContactSheet}
             onExportSVG={handleExportSVG} onShock={handleShock}
             onClearBrush={() => setClearBrushTrigger(Date.now())}
             onRecordVideo={handleRecordVideo} isRecording={isRecording}
             dpi={dpi} setDpi={setDpi} isExporting={isExporting}
+            exportFramingMode={exportFramingMode}
+            setExportFramingMode={setExportFramingMode}
+            recordingDurationMode={recordingDurationMode}
+            setRecordingDurationMode={setRecordingDurationMode}
+            recordingLoops={recordingLoops}
+            setRecordingLoops={setRecordingLoops}
+            canUseTimedRecording={canUseTimedRecording}
+            sourceVideoDuration={sourceVideoDuration}
+            gifFps={gifFps}
+            setGifFps={setGifFps}
+            gifQuality={gifQuality}
+            setGifQuality={setGifQuality}
+            gifSourceLoops={gifSourceLoops}
+            setGifSourceLoops={setGifSourceLoops}
+            gifRepeatCount={gifRepeatCount}
+            setGifRepeatCount={setGifRepeatCount}
         />
+        </div>
     </div>
   );
 }

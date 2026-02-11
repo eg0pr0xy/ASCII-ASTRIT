@@ -100,10 +100,22 @@ export enum DistortionMode {
   VHS = 'VHS'
 }
 
+export enum RenderEngine {
+  NATIVE = 'NATIVE',
+  TEXTMODE = 'TEXTMODE'
+}
+
 export enum DitheringMode {
   NONE = 'NONE',
   BAYER = 'BAYER',
   FLOYD = 'FLOYD'
+}
+
+export enum TemporalDiagnosticsMode {
+  LUMA_DELTA = 'LUMA_DELTA',
+  CHAR_LOCK = 'CHAR_LOCK',
+  EDGE_STABILITY = 'EDGE_STABILITY',
+  MOTION = 'MOTION'
 }
 
 export enum PrintDPI {
@@ -135,6 +147,7 @@ export interface CustomRampEntry {
 }
 
 export interface EngineConfig {
+  renderEngine: RenderEngine;
   seed: number;
   resolution: number;
   density: number;
@@ -162,6 +175,12 @@ export interface EngineConfig {
   temporalBlend: number;
   characterInertia: number;
   edgeTemporalStability: number;
+  temporalDiagnosticsEnabled: boolean;
+  temporalDiagnosticsMode: TemporalDiagnosticsMode;
+  temporalDiagnosticsOpacity: number;
+  adaptiveInertiaEnabled: boolean;
+  adaptiveInertiaStrength: number;
+  temporalGhostClamp: number;
   colorMode: ColorMode;
   paletteName: string;
   palette: string[];
@@ -173,11 +192,19 @@ export interface EngineConfig {
   transparentBackground: boolean;
 }
 
+export interface TemporalMetrics {
+  lockRatio: number;
+  meanLumaDelta: number;
+  meanEdgeDelta: number;
+  meanMotion: number;
+}
+
 export interface RenderMetrics {
   averageLuminance: number;
   density: number;
   entropy: number;
   dominantColor: string;
+  temporal?: TemporalMetrics;
 }
 
 export interface AsciiCanvasHandle {
@@ -188,6 +215,7 @@ export interface AsciiCanvasHandle {
 
 export interface ProjectFile {
   version: string;
+  schemaVersion?: number;
   config: EngineConfig;
   theme: ThemeMode;
   sourceImage?: string; // Base64
@@ -197,6 +225,7 @@ export interface ProjectFile {
 export interface PresetFile {
   name: string;
   version: string;
+  schemaVersion?: number;
   config: EngineConfig;
 }
 
