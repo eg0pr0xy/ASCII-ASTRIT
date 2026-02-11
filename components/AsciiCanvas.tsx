@@ -307,6 +307,18 @@ export const AsciiCanvas = React.forwardRef<any, AsciiCanvasProps>(({
             return engineRef.current.generateSVG(imageSource, config, width, height);
         }
         return null;
+    },
+    exportText: async (width: number, height: number, customConfig?: EngineConfig) => {
+        const activeConfig = customConfig || configRef.current;
+        if (!engineRef.current) return null;
+        const text = await engineRef.current.generateAsciiText(
+          imageSource,
+          activeConfig,
+          width,
+          height,
+          brushLayerRef.current || undefined
+        );
+        return text || null;
     }
   }));
 

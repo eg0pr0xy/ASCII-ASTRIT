@@ -40,8 +40,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
             <span className="text-[#5f574f]">v3.0.1 // PICO-8 // SYSTEM READY</span>
         </div>
 
-        {/* Start Button */}
-        <div className="mt-8 animate-bounce-slow">
+        {/* Start Buttons */}
+        <div className="mt-8 flex flex-col sm:flex-row gap-3 items-center">
             <PixelButton 
                 label="INITIALIZE SYSTEM" 
                 onClick={onStart} 

@@ -3,13 +3,14 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { AsciiCanvas } from './components/AsciiCanvas';
 import { LeftPanel, RightPanel } from './components/ControlPanels';
 import { LandingPage } from './components/LandingPage';
+import { HelpPage } from './components/HelpPage';
 import { Mascot } from './components/Mascot';
 import { AsciiEngine } from './services/asciiEngine';
 import { EngineConfig, AsciiMode, BrushType, AppState, AsciiCanvasHandle, FontType, ThemeMode, ColorMode, DistortionMode, DitheringMode, PaperSize, PrintDPI, RenderMetrics, ProjectFile, PresetFile, CustomRampEntry, TemporalDiagnosticsMode, RenderEngine } from './engineTypes';
 import { PRESETS, THEMES, PAPER_DIMENSIONS, DEFAULT_POST_PROCESS, DPI_MULTIPLIERS, COLOR_PALETTES, ENGINE_VERSION, SERIALIZATION_SCHEMA_VERSION, DEFAULT_CUSTOM_RAMP } from './constants';
 import GIF from 'gif.js';
 import gifWorkerUrl from 'gif.js/dist/gif.worker.js?url';
-import { SlidersHorizontal, Image as ImageIcon, X } from 'lucide-react';
+import { SlidersHorizontal, Image as ImageIcon, X, BookOpen } from 'lucide-react';
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
@@ -448,6 +449,7 @@ export default function App() {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [exportStatusLabel, setExportStatusLabel] = useState('GENERATING MASTER...');
   const [exportProgress, setExportProgress] = useState<number | null>(null);
+  const [helpAnchor, setHelpAnchor] = useState<'overview' | 'troubleshooting'>('overview');
   const rendererFallbackWarnedRef = useRef(false);
   const schemaWarningShownRef = useRef(false);
 
@@ -1187,6 +1189,52 @@ export default function App() {
     }, 100);
   };
 
+  const handleExportText = async (selectedSize: string = "SOURCE") => {
+    if (!imageSource || !canvasHandleRef.current) return;
+    setExportStatusLabel('GENERATING ASCII TEXT...');
+    setExportProgress(null);
+    setIsExporting(true);
+
+    setTimeout(async () => {
+      try {
+        const sourceDimensions = await resolveSourceDimensions(imageSource, 8000);
+        if (!sourceDimensions) {
+          alert("SOURCE DIMENSIONS ARE NOT READY. WAIT FOR VIDEO METADATA, THEN EXPORT AGAIN.");
+          return;
+        }
+
+        const { renderW, renderH } = computeExportDimensions(
+          sourceDimensions.w,
+          sourceDimensions.h,
+          selectedSize,
+          PrintDPI.SCREEN,
+          exportFramingMode
+        );
+
+        const asciiText = await canvasHandleRef.current!.exportText(renderW, renderH, config);
+        if (!asciiText || asciiText.trim().length === 0) {
+          alert("ASCII TEXT EXPORT FAILED: No glyph data generated.");
+          return;
+        }
+
+        const blob = new Blob([asciiText], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `astrit-ASCII-${config.mode}-${selectedSize}-${Date.now()}.txt`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        console.error("Text export failed:", e);
+        alert("Text export failed. Try a lower resolution or different source.");
+      } finally {
+        setIsExporting(false);
+        setExportStatusLabel('GENERATING MASTER...');
+        setExportProgress(null);
+      }
+    }, 50);
+  };
+
   const handleContactSheet = async () => {
     if (!canvasHandleRef.current || !imageSource) return;
     setExportStatusLabel('GENERATING CONTACT SHEET...');
@@ -1379,9 +1427,23 @@ export default function App() {
   }, [setConfig]);
   const sourceVideoDuration = getRecordableVideoDuration();
   const canUseTimedRecording = sourceVideoDuration !== null;
+  const openHelp = useCallback((anchor: 'overview' | 'troubleshooting' = 'overview') => {
+    setHelpAnchor(anchor);
+    setAppState(AppState.HELP);
+  }, []);
 
   if (appState === AppState.LANDING) {
       return <LandingPage onStart={() => setAppState(AppState.STUDIO)} />;
+  }
+
+  if (appState === AppState.HELP) {
+    return (
+      <HelpPage
+        onBackToLanding={() => setAppState(AppState.LANDING)}
+        onOpenStudio={() => setAppState(AppState.STUDIO)}
+        initialAnchor={helpAnchor}
+      />
+    );
   }
 
   return (
@@ -1400,6 +1462,14 @@ export default function App() {
             >
               <SlidersHorizontal size={14} />
               Controls
+            </button>
+            <button
+              onClick={() => openHelp('overview')}
+              className="h-9 w-9 bg-black/50 border border-[var(--border-module)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors flex items-center justify-center"
+              aria-label="Open help manual"
+              title="Open manual"
+            >
+              <BookOpen size={14} />
             </button>
             {mobilePanel && (
               <button
@@ -1439,6 +1509,7 @@ export default function App() {
                 config={config} setConfig={setConfig} brush={brush} setBrush={setBrush}
                 onExport={handleExport} onExportHD={handleExportHD}
                 onExportGIF={handleExportGIF}
+                onExportText={handleExportText}
                 onSocialCard={handleSocialCard} onContactSheet={handleContactSheet}
                 onExportSVG={handleExportSVG} onShock={handleShock}
                 onClearBrush={() => setClearBrushTrigger(Date.now())}
@@ -1497,6 +1568,14 @@ export default function App() {
         </div>
 
         <main className="flex-1 relative bg-[#000] flex items-center justify-center p-3 pt-16 lg:p-6 lg:pt-6 border-t-8 border-b-8 border-[var(--border-panel)] min-w-0">
+            <button
+              onClick={() => openHelp('overview')}
+              className="hidden lg:flex absolute top-3 right-3 z-40 h-8 w-8 bg-black/45 border border-[var(--border-module)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] items-center justify-center transition-colors"
+              aria-label="Open help manual"
+              title="Open manual"
+            >
+              <BookOpen size={14} />
+            </button>
             <div className="relative w-full h-full max-h-[90vh] border-2 sm:border-4 border-[var(--border-module)] bg-black rounded-lg overflow-hidden ring-2 sm:ring-4 ring-[var(--highlight)]/20 shadow-2xl">
                 {!imageSource && brush === BrushType.NONE && (
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
@@ -1526,7 +1605,7 @@ export default function App() {
             </div>
 
             <div className="hidden sm:block">
-              <Mascot />
+              <Mascot onOpenHelp={openHelp} />
             </div>
         </main>
 
@@ -1535,6 +1614,7 @@ export default function App() {
             config={config} setConfig={setConfig} brush={brush} setBrush={setBrush}
             onExport={handleExport} onExportHD={handleExportHD}
             onExportGIF={handleExportGIF}
+            onExportText={handleExportText}
             onSocialCard={handleSocialCard} onContactSheet={handleContactSheet}
             onExportSVG={handleExportSVG} onShock={handleShock}
             onClearBrush={() => setClearBrushTrigger(Date.now())}

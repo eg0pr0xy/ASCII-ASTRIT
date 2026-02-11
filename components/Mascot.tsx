@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MASCOT_FRAMES } from '../constants';
 
-export const Mascot: React.FC = () => {
+interface MascotProps {
+  onOpenHelp?: (anchor: 'overview' | 'troubleshooting') => void;
+}
+
+export const Mascot: React.FC<MascotProps> = ({ onOpenHelp }) => {
   const [frameIndex, setFrameIndex] = useState(0);
   const [state, setState] = useState<'IDLE' | 'HAPPY' | 'SLEEP' | 'SURPRISED' | 'DRAGGING'>('IDLE');
   
@@ -16,6 +20,9 @@ export const Mascot: React.FC = () => {
   const mascotRef = useRef<HTMLDivElement>(null);
   const dragOffset = useRef({ x: 0, y: 0 });
   const lastActivity = useRef(Date.now());
+  const dragStart = useRef({ x: 0, y: 0 });
+  const draggedSinceMouseDown = useRef(false);
+  const suppressClick = useRef(false);
 
   // Frame Animation Loop
   useEffect(() => {
@@ -64,6 +71,11 @@ export const Mascot: React.FC = () => {
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
         if (isDragging) {
+            if (!draggedSinceMouseDown.current) {
+                const dx = Math.abs(e.clientX - dragStart.current.x);
+                const dy = Math.abs(e.clientY - dragStart.current.y);
+                if (dx > 3 || dy > 3) draggedSinceMouseDown.current = true;
+            }
             setPosition({
                 x: e.clientX - dragOffset.current.x,
                 y: e.clientY - dragOffset.current.y
@@ -76,6 +88,7 @@ export const Mascot: React.FC = () => {
     
     const handleMouseUp = () => {
         if (isDragging) {
+            if (draggedSinceMouseDown.current) suppressClick.current = true;
             setIsDragging(false);
             setState('IDLE');
             lastActivity.current = Date.now();
@@ -95,12 +108,14 @@ export const Mascot: React.FC = () => {
       setIsDragging(true);
       setState('DRAGGING');
       lastActivity.current = Date.now();
+      draggedSinceMouseDown.current = false;
       
       const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
       dragOffset.current = {
           x: e.clientX - rect.left,
           y: e.clientY - rect.top
       };
+      dragStart.current = { x: e.clientX, y: e.clientY };
       
       if (!hasMoved) {
           setPosition({ x: rect.left, y: rect.top });
@@ -146,12 +161,18 @@ export const Mascot: React.FC = () => {
         onMouseDown={handleMouseDown}
         onMouseEnter={() => !isDragging && state !== 'SLEEP' && setState('SURPRISED')}
         onMouseLeave={() => !isDragging && state !== 'SLEEP' && setState('IDLE')}
-        onClick={() => {
-            if (!isDragging) {
-                setState(state === 'SLEEP' ? 'IDLE' : 'HAPPY'); 
-                lastActivity.current = Date.now();
-                if (state !== 'SLEEP') setTimeout(() => setState('IDLE'), 1500);
+        onClick={(e) => {
+            if (suppressClick.current) {
+                suppressClick.current = false;
+                return;
             }
+            if (onOpenHelp) {
+                onOpenHelp(e.shiftKey ? 'troubleshooting' : 'overview');
+                return;
+            }
+            setState(state === 'SLEEP' ? 'IDLE' : 'HAPPY'); 
+            lastActivity.current = Date.now();
+            if (state !== 'SLEEP') setTimeout(() => setState('IDLE'), 1500);
         }}
     >
         {/* Bounce Wrapper (Animation) */}

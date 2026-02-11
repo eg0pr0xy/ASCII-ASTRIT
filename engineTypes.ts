@@ -75,7 +75,8 @@ export enum FontType {
 
 export enum AppState {
   LANDING = 'LANDING',
-  STUDIO = 'STUDIO'
+  STUDIO = 'STUDIO',
+  HELP = 'HELP'
 }
 
 export enum ThemeMode {
@@ -211,6 +212,7 @@ export interface AsciiCanvasHandle {
   getCanvas: () => HTMLCanvasElement | null;
   triggerStaticRender: (width: number, height: number, customConfig?: EngineConfig) => Promise<Blob | null>;
   generateSVG: (width: number, height: number) => Promise<Blob | null>;
+  exportText: (width: number, height: number, customConfig?: EngineConfig) => Promise<string | null>;
 }
 
 export interface ProjectFile {

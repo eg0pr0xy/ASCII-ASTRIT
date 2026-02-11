@@ -510,6 +510,7 @@ interface RightPanelProps {
   onExport: () => void;
   onExportHD: (size: string) => void;
   onExportGIF: (size: string) => void;
+  onExportText: (size: string) => void;
   onSocialCard: () => void;
   onContactSheet: () => void;
   onExportSVG: () => void;
@@ -540,7 +541,7 @@ interface RightPanelProps {
 
 export const RightPanel: React.FC<RightPanelProps> = ({
   config, setConfig, brush, setBrush,
-  onExport, onExportHD, onExportGIF, onSocialCard, onContactSheet,
+  onExport, onExportHD, onExportGIF, onExportText, onSocialCard, onContactSheet,
   onExportSVG, onShock, onClearBrush, onRecordVideo,
   isRecording, dpi, setDpi, isExporting, exportFramingMode, setExportFramingMode,
   recordingDurationMode, setRecordingDurationMode, recordingLoops, setRecordingLoops,
@@ -548,7 +549,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   gifFps, setGifFps, gifQuality, setGifQuality, gifSourceLoops, setGifSourceLoops, gifRepeatCount, setGifRepeatCount
 }) => {
   const [exportSize, setExportSize] = useState<string>("SOURCE");
-  const [primaryExportFormat, setPrimaryExportFormat] = useState<'WEBM' | 'PNG' | 'GIF'>('WEBM');
+  const [primaryExportFormat, setPrimaryExportFormat] = useState<'WEBM' | 'PNG' | 'GIF' | 'TXT'>('WEBM');
   const isMainBusy = primaryExportFormat === 'WEBM' ? false : isExporting;
 
   const handlePrimaryExport = () => {
@@ -560,6 +561,10 @@ export const RightPanel: React.FC<RightPanelProps> = ({
       onExportHD(exportSize);
       return;
     }
+    if (primaryExportFormat === 'TXT') {
+      onExportText(exportSize);
+      return;
+    }
     onExportGIF(exportSize);
   };
 
@@ -568,7 +573,9 @@ export const RightPanel: React.FC<RightPanelProps> = ({
       ? (isRecording ? 'STOP WEBM' : 'EXPORT WEBM')
       : primaryExportFormat === 'PNG'
         ? (isExporting ? 'BUSY...' : 'EXPORT PNG')
-        : (isExporting ? 'BUSY...' : 'EXPORT GIF');
+        : primaryExportFormat === 'GIF'
+          ? (isExporting ? 'BUSY...' : 'EXPORT GIF')
+          : (isExporting ? 'BUSY...' : 'EXPORT TXT');
 
   return (
     <div className="w-full lg:w-72 xl:w-80 h-full bg-[var(--bg-panel)] border-l-4 border-[var(--border-panel)] p-3 flex flex-col gap-4 overflow-y-auto z-20">
@@ -587,8 +594,9 @@ export const RightPanel: React.FC<RightPanelProps> = ({
               Textmode
             </button>
          </div>
-         <div className="mt-2 text-[8px] uppercase text-[var(--text-muted)]">
-           Textmode mode prioritizes style speed; some native-only effects are skipped.
+         <div className="mt-2 text-[8px] text-[var(--text-muted)] leading-relaxed space-y-1">
+           <p><span className="uppercase text-[var(--highlight)]">Native:</span> full deterministic pipeline (temporal, sobel, distortion, brush).</p>
+           <p><span className="uppercase text-[var(--accent)]">Textmode:</span> WebGL2 accelerated style path with reduced feature parity and automatic native fallback.</p>
          </div>
       </PanelModule>
 
@@ -780,7 +788,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                  </div>
                )}
 
-               <div className="grid grid-cols-3 gap-1">
+               <div className="grid grid-cols-4 gap-1">
                   <button
                     onClick={() => setPrimaryExportFormat('WEBM')}
                     className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'WEBM' ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
@@ -798,6 +806,12 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                     className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'GIF' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
                   >
                     GIF
+                  </button>
+                  <button
+                    onClick={() => setPrimaryExportFormat('TXT')}
+                    className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'TXT' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                  >
+                    TXT
                   </button>
                </div>
                

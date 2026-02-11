@@ -31,6 +31,9 @@ export class AsciiEngine {
   private prevLumaBuffer = new Float32Array(0);
   private prevEdgeMagnitude = new Float32Array(0);
   private prevCharGrid: string[] = [];
+  private charGridBuffer: string[] = [];
+  private charGridCols = 0;
+  private charGridRows = 0;
   private temporalLumaDeltaBuffer = new Float32Array(0);
   private temporalLockBuffer = new Float32Array(0);
   private temporalMotionBuffer = new Float32Array(0);
@@ -71,6 +74,26 @@ export class AsciiEngine {
 
   private ensureFloatBuffer(current: Float32Array, length: number): Float32Array {
     return current.length === length ? current : new Float32Array(length);
+  }
+
+  private ensureCharGridBuffer(length: number): string[] {
+    if (this.charGridBuffer.length !== length) {
+      this.charGridBuffer = new Array<string>(length).fill(' ');
+    } else {
+      this.charGridBuffer.fill(' ');
+    }
+    return this.charGridBuffer;
+  }
+
+  private buildAsciiTextFromGrid(cols: number, rows: number): string {
+    if (cols <= 0 || rows <= 0 || this.charGridBuffer.length !== cols * rows) return '';
+    let out = '';
+    for (let y = 0; y < rows; y++) {
+      const rowStart = y * cols;
+      out += this.charGridBuffer.slice(rowStart, rowStart + cols).join('');
+      if (y < rows - 1) out += '\n';
+    }
+    return out;
   }
 
   private paletteKey(palette: string[]): string {
@@ -849,7 +872,9 @@ export class AsciiEngine {
     const semanticTokens = config.customSemanticMapping
       ? this.parseSemanticTokens(config.semanticWord || 'ASTRIT')
       : [];
-    const currentCharGrid = temporalEnabled ? new Array<string>(sampleLen).fill(' ') : null;
+    const currentCharGrid = this.ensureCharGridBuffer(sampleLen);
+    this.charGridCols = cols;
+    this.charGridRows = rows;
 
     this.compCtx.font = `${resolution}px ${config.font}, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", monospace`;
     this.compCtx.textBaseline = 'top';
@@ -981,9 +1006,7 @@ export class AsciiEngine {
           }
         }
 
-        if (currentCharGrid) {
-          currentCharGrid[gridIdx] = char;
-        }
+        currentCharGrid[gridIdx] = char;
 
         if (char === ' ') continue;
         nonSpaceChars++;
@@ -1041,7 +1064,12 @@ export class AsciiEngine {
         this.prevEdgeMagnitude.fill(0);
       }
 
-      this.prevCharGrid = currentCharGrid || [];
+      if (this.prevCharGrid.length !== sampleLen) {
+        this.prevCharGrid = new Array<string>(sampleLen).fill(' ');
+      }
+      for (let i = 0; i < sampleLen; i++) {
+        this.prevCharGrid[i] = currentCharGrid[i];
+      }
       this.temporalHistoryValid = true;
       this.lastTemporalFrameIndex = disciplinedFrameIndex;
       this.lastTemporalSampleLen = sampleLen;
@@ -1135,6 +1163,21 @@ export class AsciiEngine {
     return new Promise<Blob | null>((resolve) => {
       tempCanvas.toBlob(resolve, 'image/png', 1.0);
     });
+  }
+
+  public async generateAsciiText(
+    source: CanvasImageSource | null,
+    config: EngineConfig,
+    width: number,
+    height: number,
+    brush?: HTMLCanvasElement
+  ): Promise<string> {
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = Math.max(1, Math.floor(width));
+    tempCanvas.height = Math.max(1, Math.floor(height));
+    const engine = new AsciiEngine(tempCanvas);
+    engine.render(source, config, width, height, 0, brush, undefined, false);
+    return engine.buildAsciiTextFromGrid(engine.charGridCols, engine.charGridRows);
   }
 
   public async generateSVG(source: any, config: EngineConfig, w: number, h: number): Promise<null> {
