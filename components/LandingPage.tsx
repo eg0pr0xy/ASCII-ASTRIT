@@ -7,11 +7,11 @@ interface LandingPageProps {
 }
 
 const ASCII_WORDMARK = [
-  '    _    ____ _____ ____ ___ ____  ',
-  '   / \\  / ___|_   _|  _ \\_ _|  _ \\ ',
-  '  / _ \\ \\___ \\ | | | |_) | || | | |',
-  ' / ___ \\ ___) || | |  _ <| || |_| |',
-  '/_/   \\_\\____/ |_| |_| \\_\\___|____/ '
+  '    _    ____ _____ ____ ___ _____ ',
+  '   / \\  / ___|_   _|  _ \\_ _|_   _|',
+  '  / _ \\ \\___ \\ | | | |_) | |  | |  ',
+  ' / ___ \\ ___) || | |  _ <| |  | |  ',
+  '/_/   \\_\\____/ |_| |_| \\_\\___| |_|  '
 ].join('\n');
 
 const ASCII_START_BUTTON = [
@@ -43,7 +43,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
         {/* Logo Container */}
         <div className="relative group cursor-default flex flex-col items-center">
             <div className="absolute -inset-4 bg-[#ff004d] opacity-20 blur-xl group-hover:opacity-40 transition-opacity duration-500 animate-pulse"></div>
-            <pre className="text-[8px] sm:text-[10px] md:text-xs leading-[1.05] text-white relative z-10 whitespace-pre text-shadow-neon tracking-tight">
+            <pre className="text-[16px] sm:text-[20px] md:text-[24px] leading-[1.05] text-white relative z-10 whitespace-pre text-shadow-neon tracking-tight">
               {ASCII_WORDMARK}
             </pre>
             <div className="absolute top-0 left-0 w-full h-full animate-glitch opacity-50 pointer-events-none"></div>
