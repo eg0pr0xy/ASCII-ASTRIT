@@ -20,8 +20,8 @@ interface PointerState {
 }
 
 const CHAR_RAMP = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
-const CELL_W = 10;
-const CELL_H = 15;
+const CELL_W = 15;
+const CELL_H = 23;
 const STEP_MS = 1000 / 24;
 
 const hashSeed = (seed: string): number => {
@@ -115,7 +115,7 @@ export const LandingAsciiBackground: React.FC<LandingAsciiBackgroundProps> = ({
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.textBaseline = 'top';
-      ctx.font = '12px "JetBrains Mono", "Courier New", monospace';
+      ctx.font = '18px "JetBrains Mono", "Courier New", monospace';
 
       const cols = Math.max(24, Math.floor(width / CELL_W));
       const rows = Math.max(14, Math.floor(height / CELL_H));

@@ -46,9 +46,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
             <pre className="text-[8px] sm:text-[10px] md:text-xs leading-[1.05] text-white relative z-10 whitespace-pre text-shadow-neon tracking-tight">
               {ASCII_WORDMARK}
             </pre>
-            <h1 className="text-sm sm:text-base tracking-[0.3em] mt-2 text-[#29adff] relative z-10">
-              ASTRID
-            </h1>
             <div className="absolute top-0 left-0 w-full h-full animate-glitch opacity-50 pointer-events-none"></div>
         </div>
 
@@ -62,10 +59,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
         <div className="mt-6 flex flex-col sm:flex-row gap-3 items-center">
             <button
               onClick={onStart}
-              className="group bg-black/65 border border-[#1d2b53] hover:border-[#29adff] px-2 sm:px-3 py-2 shadow-[0_0_0_1px_rgba(41,173,255,0.18)] hover:shadow-[0_0_16px_rgba(41,173,255,0.35)] transition-all"
+              className="group bg-black/65 border border-[#1d2b53] hover:border-[#29adff] px-4 sm:px-5 py-3 shadow-[0_0_0_1px_rgba(41,173,255,0.18)] hover:shadow-[0_0_16px_rgba(41,173,255,0.35)] transition-all"
               aria-label="Initialize system"
             >
-              <pre className="whitespace-pre text-[10px] sm:text-xs leading-[1.05] text-[#29adff] group-hover:text-[#ffec27] transition-colors">
+              <pre className="whitespace-pre text-xs sm:text-sm md:text-base leading-[1.05] text-[#29adff] group-hover:text-[#ffec27] transition-colors">
                 {ASCII_START_BUTTON}
               </pre>
             </button>
