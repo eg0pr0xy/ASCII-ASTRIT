@@ -32,6 +32,7 @@ export class AsciiEngine {
   private prevEdgeMagnitude = new Float32Array(0);
   private prevCharGrid: string[] = [];
   private charGridBuffer: string[] = [];
+  private charColorBuffer = new Uint32Array(0);
   private charGridCols = 0;
   private charGridRows = 0;
   private temporalLumaDeltaBuffer = new Float32Array(0);
@@ -49,6 +50,7 @@ export class AsciiEngine {
   private paletteCache = new Map<string, RGB[]>();
   private gradientLutCache = new Map<string, string[]>();
   private rampSymbolCache = new Map<string, string[]>();
+  private cssColorPackCache = new Map<string, number>();
   private graphemeSegmenter: { segment: (input: string) => Iterable<{ segment: string }> } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -76,6 +78,10 @@ export class AsciiEngine {
     return current.length === length ? current : new Float32Array(length);
   }
 
+  private ensureUint32Buffer(current: Uint32Array, length: number): Uint32Array {
+    return current.length === length ? current : new Uint32Array(length);
+  }
+
   private ensureCharGridBuffer(length: number): string[] {
     if (this.charGridBuffer.length !== length) {
       this.charGridBuffer = new Array<string>(length).fill(' ');
@@ -96,6 +102,46 @@ export class AsciiEngine {
     return out;
   }
 
+  private buildAnsiTextFromGrid(cols: number, rows: number): string {
+    if (
+      cols <= 0 ||
+      rows <= 0 ||
+      this.charGridBuffer.length !== cols * rows ||
+      this.charColorBuffer.length !== cols * rows
+    ) {
+      return '';
+    }
+
+    let out = '';
+    let activeColor = -1;
+    const reset = '\u001b[0m';
+    for (let y = 0; y < rows; y++) {
+      const rowStart = y * cols;
+      for (let x = 0; x < cols; x++) {
+        const idx = rowStart + x;
+        const ch = this.charGridBuffer[idx] || ' ';
+        if (ch === ' ') {
+          out += ' ';
+          continue;
+        }
+
+        const packed = this.charColorBuffer[idx] || 0;
+        if (packed !== activeColor) {
+          const r = (packed >> 16) & 255;
+          const g = (packed >> 8) & 255;
+          const b = packed & 255;
+          out += `\u001b[38;2;${r};${g};${b}m`;
+          activeColor = packed;
+        }
+        out += ch;
+      }
+      out += reset;
+      activeColor = -1;
+      if (y < rows - 1) out += '\n';
+    }
+    return out;
+  }
+
   private paletteKey(palette: string[]): string {
     return palette.join('|');
   }
@@ -109,6 +155,36 @@ export class AsciiEngine {
     const gg = Math.max(0, Math.min(255, Math.round(g)));
     const bb = Math.max(0, Math.min(255, Math.round(b)));
     return `#${((1 << 24) | (rr << 16) | (gg << 8) | bb).toString(16).slice(1)}`;
+  }
+
+  private packRgb(r: number, g: number, b: number): number {
+    const rr = Math.max(0, Math.min(255, Math.round(r)));
+    const gg = Math.max(0, Math.min(255, Math.round(g)));
+    const bb = Math.max(0, Math.min(255, Math.round(b)));
+    return (rr << 16) | (gg << 8) | bb;
+  }
+
+  private parseCssColorToPacked(color: string): number {
+    const key = color.trim().toLowerCase();
+    const cached = this.cssColorPackCache.get(key);
+    if (cached !== undefined) return cached;
+
+    const hexMatch = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(key);
+    if (hexMatch) {
+      const packed = this.packRgb(parseInt(hexMatch[1], 16), parseInt(hexMatch[2], 16), parseInt(hexMatch[3], 16));
+      this.cssColorPackCache.set(key, packed);
+      return packed;
+    }
+
+    const rgbMatch = /^rgb\(\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*\)$/i.exec(key);
+    if (rgbMatch) {
+      const packed = this.packRgb(parseInt(rgbMatch[1], 10), parseInt(rgbMatch[2], 10), parseInt(rgbMatch[3], 10));
+      this.cssColorPackCache.set(key, packed);
+      return packed;
+    }
+
+    this.cssColorPackCache.set(key, 0);
+    return 0;
   }
 
   private hexToRgb(hex: string): RGB {
@@ -873,6 +949,8 @@ export class AsciiEngine {
       ? this.parseSemanticTokens(config.semanticWord || 'ASTRIT')
       : [];
     const currentCharGrid = this.ensureCharGridBuffer(sampleLen);
+    const currentColorGrid = this.ensureUint32Buffer(this.charColorBuffer, sampleLen);
+    currentColorGrid.fill(0);
     this.charGridCols = cols;
     this.charGridRows = rows;
 
@@ -1013,11 +1091,14 @@ export class AsciiEngine {
         charCounts[char] = (charCounts[char] || 0) + 1;
 
         let fillStyle = config.outlineColor;
+        let colorPacked = this.parseCssColorToPacked(fillStyle);
         if (!isEdge) {
           if (config.colorMode === ColorMode.MONO) {
             fillStyle = palette[1] || '#00ff00';
+            colorPacked = this.parseCssColorToPacked(fillStyle);
           } else if (config.colorMode === ColorMode.GRADIENT) {
             fillStyle = gradientLut[Math.max(0, Math.min(255, Math.round(luminance * 255)))];
+            colorPacked = this.parseCssColorToPacked(fillStyle);
           } else {
             const cIdx = lIdx * 4;
             let r = this.gradedBuffer[cIdx];
@@ -1039,11 +1120,17 @@ export class AsciiEngine {
 
             if (config.colorMode === ColorMode.QUANTIZED) {
               fillStyle = this.findNearestColor(r * 255, g * 255, b * 255, palette, paletteRgb);
+              colorPacked = this.parseCssColorToPacked(fillStyle);
             } else {
-              fillStyle = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+              const rr = Math.round(r * 255);
+              const gg = Math.round(g * 255);
+              const bb = Math.round(b * 255);
+              fillStyle = `rgb(${rr},${gg},${bb})`;
+              colorPacked = this.packRgb(rr, gg, bb);
             }
           }
         }
+        currentColorGrid[gridIdx] = colorPacked;
 
         if (fillStyle !== lastFillStyle) {
           this.compCtx.fillStyle = fillStyle;
@@ -1178,6 +1265,21 @@ export class AsciiEngine {
     const engine = new AsciiEngine(tempCanvas);
     engine.render(source, config, width, height, 0, brush, undefined, false);
     return engine.buildAsciiTextFromGrid(engine.charGridCols, engine.charGridRows);
+  }
+
+  public async generateAnsiText(
+    source: CanvasImageSource | null,
+    config: EngineConfig,
+    width: number,
+    height: number,
+    brush?: HTMLCanvasElement
+  ): Promise<string> {
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = Math.max(1, Math.floor(width));
+    tempCanvas.height = Math.max(1, Math.floor(height));
+    const engine = new AsciiEngine(tempCanvas);
+    engine.render(source, config, width, height, 0, brush, undefined, false);
+    return engine.buildAnsiTextFromGrid(engine.charGridCols, engine.charGridRows);
   }
 
   public async generateSVG(source: any, config: EngineConfig, w: number, h: number): Promise<null> {

@@ -164,12 +164,20 @@ export const HelpPage: React.FC<HelpPageProps> = ({ onBackToLanding, onOpenStudi
             <p>Canvas stream recording (infinite or timed via source duration/loops).</p>
             <p>`TXT`:</p>
             <p>Exports rendered glyph matrix as plain text preserving the frame's ASCII structure.</p>
+            <p>`ANS`:</p>
+            <p>Exports ANSI truecolor text (`.ans`) with per-glyph foreground color escape codes.</p>
+            <p>`TXT BATCH`:</p>
+            <p>For imported video files, captures frame-sequence ASCII text into one batch `.txt` file.</p>
           </Section>
 
           <Section title="10. TXT Export Guide">
             <p>
               TXT export writes one line per render row and one glyph per render cell. Open the file in a monospaced
               editor or print pipeline to keep alignment intact.
+            </p>
+            <p>
+              ANSI `.ans` export keeps the same grid and adds per-glyph foreground color escape codes for terminal-style
+              playback.
             </p>
             <p>
               For print-like output: choose stable glyph sets, reduce resolution until line lengths match target paper

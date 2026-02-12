@@ -213,6 +213,7 @@ export interface AsciiCanvasHandle {
   triggerStaticRender: (width: number, height: number, customConfig?: EngineConfig) => Promise<Blob | null>;
   generateSVG: (width: number, height: number) => Promise<Blob | null>;
   exportText: (width: number, height: number, customConfig?: EngineConfig) => Promise<string | null>;
+  exportAnsi: (width: number, height: number, customConfig?: EngineConfig) => Promise<string | null>;
 }
 
 export interface ProjectFile {

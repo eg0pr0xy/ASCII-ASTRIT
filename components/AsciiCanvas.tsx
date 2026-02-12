@@ -310,15 +310,31 @@ export const AsciiCanvas = React.forwardRef<any, AsciiCanvasProps>(({
     },
     exportText: async (width: number, height: number, customConfig?: EngineConfig) => {
         const activeConfig = customConfig || configRef.current;
-        if (!engineRef.current) return null;
-        const text = await engineRef.current.generateAsciiText(
-          imageSource,
+        const exportEngine =
+          engineRef.current ||
+          new AsciiEngine(Object.assign(document.createElement('canvas'), { width: 1, height: 1 }));
+        const text = await exportEngine.generateAsciiText(
+          imageSourceRef.current,
           activeConfig,
           width,
           height,
           brushLayerRef.current || undefined
         );
         return text || null;
+    },
+    exportAnsi: async (width: number, height: number, customConfig?: EngineConfig) => {
+        const activeConfig = customConfig || configRef.current;
+        const exportEngine =
+          engineRef.current ||
+          new AsciiEngine(Object.assign(document.createElement('canvas'), { width: 1, height: 1 }));
+        const ansi = await exportEngine.generateAnsiText(
+          imageSourceRef.current,
+          activeConfig,
+          width,
+          height,
+          brushLayerRef.current || undefined
+        );
+        return ansi || null;
     }
   }));
 

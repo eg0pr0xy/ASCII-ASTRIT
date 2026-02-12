@@ -1235,6 +1235,153 @@ export default function App() {
     }, 50);
   };
 
+  const handleExportAnsi = async (selectedSize: string = "SOURCE") => {
+    if (!imageSource || !canvasHandleRef.current) return;
+    setExportStatusLabel('GENERATING ANSI TEXT...');
+    setExportProgress(null);
+    setIsExporting(true);
+
+    setTimeout(async () => {
+      try {
+        const sourceDimensions = await resolveSourceDimensions(imageSource, 8000);
+        if (!sourceDimensions) {
+          alert("SOURCE DIMENSIONS ARE NOT READY. WAIT FOR VIDEO METADATA, THEN EXPORT AGAIN.");
+          return;
+        }
+
+        const { renderW, renderH } = computeExportDimensions(
+          sourceDimensions.w,
+          sourceDimensions.h,
+          selectedSize,
+          PrintDPI.SCREEN,
+          exportFramingMode
+        );
+
+        const ansiText = await canvasHandleRef.current!.exportAnsi(renderW, renderH, config);
+        if (!ansiText || ansiText.trim().length === 0) {
+          alert("ANSI EXPORT FAILED: No glyph data generated.");
+          return;
+        }
+
+        const blob = new Blob([ansiText], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `astrit-ANSI-${config.mode}-${selectedSize}-${Date.now()}.ans`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        console.error("ANSI export failed:", e);
+        alert("ANSI export failed. Try a lower resolution or different source.");
+      } finally {
+        setIsExporting(false);
+        setExportStatusLabel('GENERATING MASTER...');
+        setExportProgress(null);
+      }
+    }, 50);
+  };
+
+  const handleExportTextBatch = async (selectedSize: string = "SOURCE") => {
+    if (!imageSource || !canvasHandleRef.current) return;
+    if (!(imageSource instanceof HTMLVideoElement)) {
+      alert("TXT BATCH EXPORT REQUIRES A VIDEO SOURCE.");
+      return;
+    }
+    if (imageSource.srcObject) {
+      alert("TXT BATCH EXPORT REQUIRES AN IMPORTED VIDEO FILE (NOT LIVE WEBCAM).");
+      return;
+    }
+
+    const sourceVideo = imageSource;
+    if (!Number.isFinite(sourceVideo.duration) || sourceVideo.duration <= 0) {
+      alert("VIDEO DURATION IS NOT READY. WAIT FOR METADATA, THEN EXPORT AGAIN.");
+      return;
+    }
+
+    setExportStatusLabel('CAPTURING TXT FRAMES...');
+    setExportProgress(0);
+    setIsExporting(true);
+
+    setTimeout(async () => {
+      const wasPaused = sourceVideo.paused || sourceVideo.ended;
+      const originalTime = Number.isFinite(sourceVideo.currentTime) ? sourceVideo.currentTime : 0;
+      try {
+        const sourceDimensions = await resolveSourceDimensions(sourceVideo, 8000);
+        if (!sourceDimensions) {
+          alert("SOURCE DIMENSIONS ARE NOT READY. WAIT FOR VIDEO METADATA, THEN EXPORT AGAIN.");
+          return;
+        }
+
+        const { renderW, renderH } = computeExportDimensions(
+          sourceDimensions.w,
+          sourceDimensions.h,
+          selectedSize,
+          PrintDPI.SCREEN,
+          exportFramingMode
+        );
+
+        const fps = Math.max(1, Math.min(30, Math.round(gifFps)));
+        const loops = Math.max(1, Math.min(20, Math.round(gifSourceLoops)));
+        const duration = sourceVideo.duration;
+        let frameCount = Math.max(1, Math.ceil(duration * fps * loops));
+        const MAX_TXT_BATCH_FRAMES = 240;
+        if (frameCount > MAX_TXT_BATCH_FRAMES) {
+          frameCount = MAX_TXT_BATCH_FRAMES;
+          alert(`TXT batch frame count capped to ${MAX_TXT_BATCH_FRAMES} for performance. Reduce loops/FPS for longer exports.`);
+        }
+
+        sourceVideo.pause();
+        await seekVideoTo(sourceVideo, 0);
+
+        const chunks: string[] = [];
+        chunks.push(`# ASTRIT TXT BATCH\n`);
+        chunks.push(`# MODE=${config.mode}\n`);
+        chunks.push(`# SIZE=${selectedSize}\n`);
+        chunks.push(`# FPS=${fps}\n`);
+        chunks.push(`# SOURCE_LOOPS=${loops}\n`);
+        chunks.push(`# FRAMES=${frameCount}\n`);
+        chunks.push(`# SOURCE_DURATION=${duration.toFixed(6)}\n\n`);
+
+        for (let i = 0; i < frameCount; i++) {
+          const sourceTime = (i / fps) % duration;
+          await seekVideoTo(sourceVideo, sourceTime);
+          const asciiText = await canvasHandleRef.current!.exportText(renderW, renderH, config);
+          if (!asciiText) {
+            throw new Error(`TXT frame export failed at frame ${i + 1}.`);
+          }
+
+          chunks.push(`----- FRAME ${String(i + 1).padStart(4, '0')} | T=${sourceTime.toFixed(3)}s -----\n`);
+          chunks.push(asciiText);
+          if (i < frameCount - 1) chunks.push('\n\f\n');
+          setExportProgress((i + 1) / frameCount);
+        }
+
+        const blob = new Blob(chunks, { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `astrit-ASCII-BATCH-${selectedSize}-${fps}fps-${Date.now()}.txt`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        console.error("TXT batch export failed:", e);
+        alert("TXT batch export failed. Try lower loops/FPS or a smaller output size.");
+      } finally {
+        try {
+          await seekVideoTo(sourceVideo, originalTime);
+          if (!wasPaused) {
+            void sourceVideo.play().catch((err) => console.warn('Video resume failed after TXT batch export:', err));
+          }
+        } catch (restoreError) {
+          console.warn('Could not restore video state after TXT batch export:', restoreError);
+        }
+        setIsExporting(false);
+        setExportStatusLabel('GENERATING MASTER...');
+        setExportProgress(null);
+      }
+    }, 100);
+  };
+
   const handleContactSheet = async () => {
     if (!canvasHandleRef.current || !imageSource) return;
     setExportStatusLabel('GENERATING CONTACT SHEET...');
@@ -1510,6 +1657,8 @@ export default function App() {
                 onExport={handleExport} onExportHD={handleExportHD}
                 onExportGIF={handleExportGIF}
                 onExportText={handleExportText}
+                onExportAnsi={handleExportAnsi}
+                onExportTextBatch={handleExportTextBatch}
                 onSocialCard={handleSocialCard} onContactSheet={handleContactSheet}
                 onExportSVG={handleExportSVG} onShock={handleShock}
                 onClearBrush={() => setClearBrushTrigger(Date.now())}
@@ -1615,6 +1764,8 @@ export default function App() {
             onExport={handleExport} onExportHD={handleExportHD}
             onExportGIF={handleExportGIF}
             onExportText={handleExportText}
+            onExportAnsi={handleExportAnsi}
+            onExportTextBatch={handleExportTextBatch}
             onSocialCard={handleSocialCard} onContactSheet={handleContactSheet}
             onExportSVG={handleExportSVG} onShock={handleShock}
             onClearBrush={() => setClearBrushTrigger(Date.now())}

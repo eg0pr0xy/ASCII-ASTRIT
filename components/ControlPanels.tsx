@@ -511,6 +511,8 @@ interface RightPanelProps {
   onExportHD: (size: string) => void;
   onExportGIF: (size: string) => void;
   onExportText: (size: string) => void;
+  onExportAnsi: (size: string) => void;
+  onExportTextBatch: (size: string) => void;
   onSocialCard: () => void;
   onContactSheet: () => void;
   onExportSVG: () => void;
@@ -541,7 +543,7 @@ interface RightPanelProps {
 
 export const RightPanel: React.FC<RightPanelProps> = ({
   config, setConfig, brush, setBrush,
-  onExport, onExportHD, onExportGIF, onExportText, onSocialCard, onContactSheet,
+  onExport, onExportHD, onExportGIF, onExportText, onExportAnsi, onExportTextBatch, onSocialCard, onContactSheet,
   onExportSVG, onShock, onClearBrush, onRecordVideo,
   isRecording, dpi, setDpi, isExporting, exportFramingMode, setExportFramingMode,
   recordingDurationMode, setRecordingDurationMode, recordingLoops, setRecordingLoops,
@@ -549,7 +551,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
   gifFps, setGifFps, gifQuality, setGifQuality, gifSourceLoops, setGifSourceLoops, gifRepeatCount, setGifRepeatCount
 }) => {
   const [exportSize, setExportSize] = useState<string>("SOURCE");
-  const [primaryExportFormat, setPrimaryExportFormat] = useState<'WEBM' | 'PNG' | 'GIF' | 'TXT'>('WEBM');
+  const [primaryExportFormat, setPrimaryExportFormat] = useState<'WEBM' | 'PNG' | 'GIF' | 'TXT' | 'ANS'>('WEBM');
   const isMainBusy = primaryExportFormat === 'WEBM' ? false : isExporting;
 
   const handlePrimaryExport = () => {
@@ -565,6 +567,10 @@ export const RightPanel: React.FC<RightPanelProps> = ({
       onExportText(exportSize);
       return;
     }
+    if (primaryExportFormat === 'ANS') {
+      onExportAnsi(exportSize);
+      return;
+    }
     onExportGIF(exportSize);
   };
 
@@ -575,7 +581,9 @@ export const RightPanel: React.FC<RightPanelProps> = ({
         ? (isExporting ? 'BUSY...' : 'EXPORT PNG')
         : primaryExportFormat === 'GIF'
           ? (isExporting ? 'BUSY...' : 'EXPORT GIF')
-          : (isExporting ? 'BUSY...' : 'EXPORT TXT');
+          : primaryExportFormat === 'TXT'
+            ? (isExporting ? 'BUSY...' : 'EXPORT TXT')
+            : (isExporting ? 'BUSY...' : 'EXPORT ANS');
 
   return (
     <div className="w-full lg:w-72 xl:w-80 h-full bg-[var(--bg-panel)] border-l-4 border-[var(--border-panel)] p-3 flex flex-col gap-4 overflow-y-auto z-20">
@@ -788,7 +796,7 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                  </div>
                )}
 
-               <div className="grid grid-cols-4 gap-1">
+               <div className="grid grid-cols-5 gap-1">
                   <button
                     onClick={() => setPrimaryExportFormat('WEBM')}
                     className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'WEBM' ? 'bg-[var(--highlight)] text-black border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
@@ -813,6 +821,12 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                   >
                     TXT
                   </button>
+                  <button
+                    onClick={() => setPrimaryExportFormat('ANS')}
+                    className={`px-2 py-1 text-[8px] border uppercase ${primaryExportFormat === 'ANS' ? 'bg-[var(--accent)] text-[var(--text-on-accent)] border-white' : 'bg-black border-[var(--border-module)] text-[var(--text-muted)]'}`}
+                  >
+                    ANS
+                  </button>
                </div>
                
                <PixelButton 
@@ -826,8 +840,18 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                     ? (isRecording ? <Square size={14} className="fill-current" /> : <Video size={14}/>)
                     : primaryExportFormat === 'PNG'
                       ? (isExporting ? <Loader2 className="animate-spin" size={14}/> : <Cpu size={14}/>)
-                      : (isExporting ? <Loader2 className="animate-spin" size={14}/> : <Film size={14}/>)
+                      : primaryExportFormat === 'GIF'
+                        ? (isExporting ? <Loader2 className="animate-spin" size={14}/> : <Film size={14}/>)
+                        : (isExporting ? <Loader2 className="animate-spin" size={14}/> : <Binary size={14}/>)
                 }
+               />
+               <PixelButton
+                label="EXPORT TXT BATCH"
+                onClick={() => onExportTextBatch(exportSize)}
+                variant="hardware"
+                className="w-full"
+                disabled={isExporting || isRecording || !canUseTimedRecording}
+                icon={isExporting ? <Loader2 className="animate-spin" size={14}/> : <Layers size={14}/>}
                />
 
                <div className="bg-black/40 border border-[var(--border-module)] p-2 flex flex-col gap-2">
