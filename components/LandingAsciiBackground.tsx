@@ -13,6 +13,12 @@ interface GridState {
   drift: Float32Array;
 }
 
+interface PointerState {
+  x: number;
+  y: number;
+  active: boolean;
+}
+
 const CHAR_RAMP = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 const CELL_W = 10;
 const CELL_H = 15;
@@ -64,6 +70,8 @@ export const LandingAsciiBackground: React.FC<LandingAsciiBackgroundProps> = ({
   const lastTimeRef = useRef<number | null>(null);
   const gridRef = useRef<GridState | null>(null);
   const seedRef = useRef(hashSeed(seed));
+  const pointerTargetRef = useRef<PointerState>({ x: 0.5, y: 0.5, active: false });
+  const pointerCurrentRef = useRef<PointerState>({ x: 0.5, y: 0.5, active: false });
 
   useEffect(() => {
     seedRef.current = hashSeed(seed);
@@ -75,6 +83,26 @@ export const LandingAsciiBackground: React.FC<LandingAsciiBackgroundProps> = ({
 
     const ctx = canvas.getContext('2d', { alpha: true });
     if (!ctx) return;
+
+    const setPointer = (clientX: number, clientY: number, active: boolean) => {
+      const width = Math.max(1, window.innerWidth);
+      const height = Math.max(1, window.innerHeight);
+      pointerTargetRef.current.x = clamp01(clientX / width);
+      pointerTargetRef.current.y = clamp01(clientY / height);
+      pointerTargetRef.current.active = active;
+    };
+
+    const handleMouseMove = (event: MouseEvent) => {
+      setPointer(event.clientX, event.clientY, true);
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      const firstTouch = event.touches[0];
+      if (!firstTouch) return;
+      setPointer(firstTouch.clientX, firstTouch.clientY, true);
+    };
+    const handlePointerLeave = () => {
+      pointerTargetRef.current.active = false;
+    };
 
     const resize = () => {
       const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
@@ -107,10 +135,21 @@ export const LandingAsciiBackground: React.FC<LandingAsciiBackgroundProps> = ({
       ctx.fillRect(0, 0, width, height);
 
       const t = frameIndex * (1 / 24);
-      const orbX = 0.5 + Math.sin(t * 0.9) * 0.28;
-      const orbY = 0.5 + Math.cos(t * 0.66) * 0.22;
-      const orb2X = 0.5 + Math.cos(t * 0.47 + 1.3) * 0.34;
-      const orb2Y = 0.5 + Math.sin(t * 0.58 + 0.7) * 0.24;
+      const pointerTarget = pointerTargetRef.current;
+      const pointerCurrent = pointerCurrentRef.current;
+      const targetX = pointerTarget.active ? pointerTarget.x : 0.5;
+      const targetY = pointerTarget.active ? pointerTarget.y : 0.5;
+      pointerCurrent.x += (targetX - pointerCurrent.x) * 0.08;
+      pointerCurrent.y += (targetY - pointerCurrent.y) * 0.08;
+      pointerCurrent.active = pointerTarget.active;
+
+      const mouseX = pointerCurrent.x - 0.5;
+      const mouseY = pointerCurrent.y - 0.5;
+
+      const orbX = 0.5 + Math.sin(t * 0.9) * 0.28 + mouseX * 0.24;
+      const orbY = 0.5 + Math.cos(t * 0.66) * 0.22 + mouseY * 0.2;
+      const orb2X = 0.5 + Math.cos(t * 0.47 + 1.3) * 0.34 - mouseX * 0.16;
+      const orb2Y = 0.5 + Math.sin(t * 0.58 + 0.7) * 0.24 - mouseY * 0.14;
 
       for (let y = 0; y < rows; y += 1) {
         const ny = rows > 1 ? y / (rows - 1) : 0;
@@ -122,14 +161,19 @@ export const LandingAsciiBackground: React.FC<LandingAsciiBackgroundProps> = ({
           const dy1 = ny - orbY;
           const dx2 = nx - orb2X;
           const dy2 = ny - orb2Y;
+          const pointerDx = nx - pointerCurrent.x;
+          const pointerDy = ny - pointerCurrent.y;
 
           const orb = Math.exp(-((dx1 * dx1 + dy1 * dy1) * 9.5));
           const orb2 = Math.exp(-((dx2 * dx2 + dy2 * dy2) * 12.0));
+          const pointerFocus = pointerCurrent.active
+            ? Math.exp(-((pointerDx * pointerDx + pointerDy * pointerDy) * 28.0))
+            : 0;
           const wave =
-            Math.sin((nx * 8.8 + t * (0.8 + drift[idx] * 0.2)) + pulse[idx]) * 0.24 +
-            Math.cos((ny * 9.6 - t * (0.7 + drift[idx] * 0.25)) + pulse[idx] * 0.65) * 0.19;
+            Math.sin((nx * 8.8 + t * (0.8 + drift[idx] * 0.2) + mouseX * 2.6) + pulse[idx]) * 0.24 +
+            Math.cos((ny * 9.6 - t * (0.7 + drift[idx] * 0.25) + mouseY * 2.1) + pulse[idx] * 0.65) * 0.19;
 
-          const base = noise[idx] * 0.36 + wave + orb * 0.7 + orb2 * 0.48;
+          const base = noise[idx] * 0.36 + wave + orb * 0.7 + orb2 * 0.48 + pointerFocus * 0.42;
           const luma = clamp01(base);
           const rampIndex = Math.min(CHAR_RAMP.length - 1, Math.floor(luma * CHAR_RAMP.length));
           const char = CHAR_RAMP[rampIndex];
@@ -167,10 +211,20 @@ export const LandingAsciiBackground: React.FC<LandingAsciiBackgroundProps> = ({
 
     resize();
     window.addEventListener('resize', resize);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    window.addEventListener('mouseleave', handlePointerLeave);
+    window.addEventListener('touchend', handlePointerLeave);
+    window.addEventListener('touchcancel', handlePointerLeave);
     rafRef.current = window.requestAnimationFrame(tick);
 
     return () => {
       window.removeEventListener('resize', resize);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('mouseleave', handlePointerLeave);
+      window.removeEventListener('touchend', handlePointerLeave);
+      window.removeEventListener('touchcancel', handlePointerLeave);
       if (rafRef.current !== null) {
         window.cancelAnimationFrame(rafRef.current);
       }
