@@ -2,6 +2,7 @@
 import React from 'react';
 import { PixelButton } from './UIComponents';
 import { Play } from 'lucide-react';
+import { LandingAsciiBackground } from './LandingAsciiBackground';
 
 interface LandingPageProps {
   onStart: () => void;
@@ -10,6 +11,8 @@ interface LandingPageProps {
 export const LandingPage: React.FC<LandingPageProps> = ({ onStart }) => {
   return (
     <div className="w-full h-screen bg-black flex flex-col items-center justify-center relative overflow-hidden font-mono">
+      <LandingAsciiBackground className="absolute inset-0 pointer-events-none opacity-80" />
+
       {/* Background Grid */}
       <div 
         className="absolute inset-0 opacity-20 pointer-events-none" 
